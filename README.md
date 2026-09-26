@@ -6,7 +6,7 @@ guarded simulated escrow stay together in one persistent case.
 
 ## Run locally
 
-Requires Node.js 20.9+ and pnpm. No API keys are required for the demo.
+Requires Node.js 22+ and pnpm. No API keys are required for the demo.
 
 ```sh
 pnpm install
@@ -48,8 +48,13 @@ limitations.
 | Gemini | Server-side structured evidence analysis and before/after comparison when configured |
 | Nessie | Opt-in mock account, rent, and transaction context |
 | Photon | Opt-in approved-recipient outbound iMessage; demo replies by default |
-| MongoDB Atlas | Optional session storage; local atomic JSON persistence by default |
+| MongoDB Atlas | Session records and GridFS uploads when configured; local atomic JSON persistence by default |
 | XRPL | Isolated, guarded testnet tooling; application escrow is always simulated USD |
+
+For Atlas, follow [database setup](docs/mongodb-atlas.md), then run
+`pnpm db:check` to verify indexes and a temporary write/read/delete probe.
+An Atlas Administration API key is not needed. Switching storage does not
+automatically import existing local cases.
 
 ## Verification
 
@@ -82,8 +87,8 @@ validation, and the full repair-to-settlement flow.
 Local records and uploads are stored under ignored `.data/`. The demo uses
 opaque browser-session cookies, not production user accounts. Do not publicly
 deploy this prototype with personal tenant records or live messaging enabled
-before adding production authentication, retention controls, external upload
-storage, and delivery/reconciliation handling.
+before adding production authentication, retention and backup controls, and
+delivery/reconciliation handling.
 
 ## Scope
 
