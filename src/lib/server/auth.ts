@@ -3,7 +3,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { ApiError } from "./errors";
-import { mutateSession, readSession } from "./store";
+import { mutateSession, type SessionDocument } from "./store";
 
 export type UserRole = "tenant" | "landlord";
 
@@ -36,15 +36,17 @@ export async function registerUser(ownerId: string, input: z.infer<typeof regist
       ...(input.walletAddress ? { walletAddress: input.walletAddress } : {}),
       registeredAt: previous?.registeredAt ?? new Date().toISOString(),
     };
-    if (previous) Object.assign(previous, user);
-    else users.push(user);
+    if (previous) {
+      Object.assign(previous, user);
+      return previous;
+    }
+    users.push(user);
     return user;
   });
 }
 
-export async function getRegisteredUser(ownerId: string, role: UserRole): Promise<RegisteredUser> {
-  const session = await readSession(ownerId);
-  const user = session?.users?.find((item) => item.role === role);
+export function getRegisteredUser(session: Pick<SessionDocument, "users">, role: UserRole): RegisteredUser {
+  const user = session.users?.find((item) => item.role === role);
   if (!user) throw new ApiError(401, `Register a ${role} profile in this demo session first.`);
   return user;
 }

@@ -142,6 +142,8 @@ export async function resetSession(ownerId: string) {
     document.accountBalanceCents = fresh.accountBalanceCents;
     document.simulatedDebitsCents = fresh.simulatedDebitsCents;
     document.uncertainDeliveries = [];
+    delete document.users;
+    delete document.contracts;
     return document.cases;
   });
 }

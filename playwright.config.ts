@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
+import { baseURL } from "./tests/e2e/environment";
 
-const baseURL = process.env.E2E_BASE_URL || "http://127.0.0.1:3100";
 const target = new URL(baseURL);
 if (target.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(target.hostname)
   || target.pathname !== "/" || target.search || target.hash || target.username || target.password) {

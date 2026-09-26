@@ -3,7 +3,7 @@ import { test, type TestContext } from "node:test";
 import { createContract, createCaseForContract, acceptContract } from "../src/lib/server/contracts";
 import { registerUser } from "../src/lib/server/auth";
 import { performCaseAction } from "../src/lib/server/cases";
-import { createSession, readSession } from "../src/lib/server/store";
+import { createSession, readSession, resetSession, mutateSession } from "../src/lib/server/store";
 import type { TransactionIntent } from "../src/lib/types";
 
 function localStorage(t: TestContext) {
@@ -105,4 +105,62 @@ test("anonymous dashboard seed remains the unregistered RE-1042 demo fixture", a
   assert.equal(demo.escrow.destination, "DEMO_LANDLORD_WALLET");
   assert.equal(demo.disputedAmountCents, 40_000);
   assert.equal(demo.evidence[0]?.id, "DEMO-EVIDENCE-BEFORE");
+});
+
+test("registration updates return the same merged profile that is stored", async (t) => {
+  localStorage(t);
+  const { document } = await createSession();
+  const first = await registerUser(document.ownerId, {
+    role: "tenant", displayName: "Taylor", email: "Taylor@Example.com", walletAddress: "rTENANT789",
+  });
+  const updated = await registerUser(document.ownerId, { role: "tenant", displayName: "Taylor Tenant" });
+  const stored = await readSession(document.ownerId);
+  assert.deepEqual(updated, stored?.users?.[0]);
+  assert.equal(updated.id, first.id);
+  assert.equal(updated.registeredAt, first.registeredAt);
+  assert.equal(updated.email, "taylor@example.com");
+  assert.equal(updated.walletAddress, "rTENANT789");
+});
+
+test("reset clears registrations and contracts without changing another session", async (t) => {
+  localStorage(t);
+  const { document } = await createSession();
+  const other = await createSession();
+  await registerUser(document.ownerId, { role: "tenant", displayName: "Taylor" });
+  await registerUser(document.ownerId, { role: "landlord", displayName: "Alex" });
+  const contract = await createContract(document.ownerId, { case_type: "self_documentation", terms: "Demo terms" });
+  await createCaseForContract(document.ownerId, { contractId: contract.id, case: caseInput });
+  await resetSession(document.ownerId);
+  const reset = await readSession(document.ownerId);
+  assert.equal(reset?.users, undefined);
+  assert.equal(reset?.contracts, undefined);
+  assert.equal(reset?.cases.length, 1);
+  assert.equal(reset?.cases[0].id, "RE-1042");
+  assert.deepEqual(await readSession(other.document.ownerId), other.document);
+  await assert.rejects(createContract(document.ownerId, { case_type: "self_documentation", terms: "New terms" }), /register a tenant/i);
+  await registerUser(document.ownerId, { role: "tenant", displayName: "New registration" });
+  const fresh = await createContract(document.ownerId, { case_type: "self_documentation", terms: "New terms" });
+  assert.notEqual(fresh.id, contract.id);
+});
+
+test("a queued reset cannot leave a contract referring to a removed profile", async (t) => {
+  localStorage(t);
+  const { document } = await createSession();
+  await registerUser(document.ownerId, { role: "tenant", displayName: "Taylor" });
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const held = mutateSession(document.ownerId, async () => { entered(); await gate; });
+  await ready;
+  const reset = resetSession(document.ownerId);
+  const creation = createContract(document.ownerId, { case_type: "self_documentation", terms: "Demo terms" });
+  const rejected = assert.rejects(creation, /register a tenant/i);
+  release();
+  await held;
+  await reset;
+  await rejected;
+  const after = await readSession(document.ownerId);
+  assert.equal(after?.users, undefined);
+  assert.equal(after?.contracts, undefined);
 });

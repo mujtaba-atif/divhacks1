@@ -72,15 +72,15 @@ function active(contract: DigitalContract) {
 }
 
 export async function createContract(ownerId: string, input: z.infer<typeof contractSchema>) {
-  const tenant = await getRegisteredUser(ownerId, "tenant");
-  const createdAt = new Date().toISOString();
-  const termsHash = hashTerms(input.case_type, input.terms);
-  const contract: DigitalContract = {
-    id: randomUUID(), case_type: input.case_type, terms: input.terms, termsHash, tenantUserId: tenant.id, createdAt,
-    acceptances: [{ role: "tenant", userId: tenant.id, acceptedAt: createdAt, termsHash, method: "stored_acceptance" }],
-    status: input.case_type === "self_documentation" ? "active" : "pending_landlord",
-  };
   return mutateSession(ownerId, (document) => {
+    const tenant = getRegisteredUser(document, "tenant");
+    const createdAt = new Date().toISOString();
+    const termsHash = hashTerms(input.case_type, input.terms);
+    const contract: DigitalContract = {
+      id: randomUUID(), case_type: input.case_type, terms: input.terms, termsHash, tenantUserId: tenant.id, createdAt,
+      acceptances: [{ role: "tenant", userId: tenant.id, acceptedAt: createdAt, termsHash, method: "stored_acceptance" }],
+      status: input.case_type === "self_documentation" ? "active" : "pending_landlord",
+    };
     const contracts = document.contracts ??= [];
     if (contracts.length >= 50) throw new ApiError(409, "This demo allows up to 50 contracts per session.");
     contracts.push(contract);
@@ -89,8 +89,8 @@ export async function createContract(ownerId: string, input: z.infer<typeof cont
 }
 
 export async function acceptContract(ownerId: string, contractId: string, role: "tenant" | "landlord") {
-  const user = await getRegisteredUser(ownerId, role);
   return mutateSession(ownerId, (document) => {
+    const user = getRegisteredUser(document, role);
     const contract = document.contracts?.find((item) => item.id === contractId);
     if (!contract) throw new ApiError(404, "Contract not found in this demo session.");
     if (contract.status === "used") throw new ApiError(409, "This contract has already created a case.");

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-const origin = process.env.E2E_BASE_URL || "http://127.0.0.1:3000";
+import { origin } from "./environment";
 
 const caseInput = {
   issue: "heating", description: "The radiator has stopped producing heat in this apartment.",

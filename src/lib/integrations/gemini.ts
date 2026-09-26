@@ -120,7 +120,9 @@ const DAY_NAMES = ["sunday", "monday", "tuesday", "wednesday", "thursday", "frid
 const COMPLETE = /\b(fixed|repaired|resolved|restored|completed?|finished|done|working (?:again|now)|back on)\b/i;
 const NOT_YET = /\b(not|never|will|going to|once|until|yet|soon)\b|n['’]t\b/i;
 const REFUSAL = /\b(can(?:no|['’])t|won['’]t|will not|refuse\w*|not (?:responsible|our problem|my problem)|no one)\b/i;
-const SCHEDULING = /\b(schedul\w*|come by|come over|coming|stop by|visit|send (?:someone|a|the)|technician|plumber|super|maintenance|inspect\w*|appointment)\b/i;
+const REPAIR_VISIT = /\b(repair|come by|come over|coming|stop by|visit\w*|send (?:someone|a|the)|technician|plumber|super|maintenance|inspect\w*|appointment)\b/i;
+const SCHEDULE_COMMITMENT = /\b(scheduled|booked|confirmed|arranged|coming|visiting|(?:will|can) (?:come|visit|send|stop|arrive|inspect|be there)|(?:i|we)['’]ll (?:come|visit|send|stop|arrive|inspect|be there)|(?:i am|we are|i['’]m|we['’]re) sending)\b/i;
+const NEGATED_SCHEDULE = /\b(not|never|cancelled|canceled|unscheduled|unconfirmed|no (?:appointment|visit|technician))\b|n['’]t\b/i;
 
 function newYorkDate(date: Date) {
   return new Intl.DateTimeFormat("en-US", { timeZone: NEW_YORK, month: "short", day: "numeric" }).format(date);
@@ -128,13 +130,19 @@ function newYorkDate(date: Date) {
 
 // Resolves phrases like "tomorrow at 10 AM" against when the reply arrived, in New York time.
 export function scheduleLabel(text: string, receivedAt: Date): string | undefined {
+  if (!Number.isFinite(receivedAt.getTime())) return undefined;
   const clock = /\b(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*([ap])\.?\s?m\b/i.exec(text);
   const day = /\b(today|tonight|tomorrow|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i.exec(text)?.[1].toLowerCase();
   let dateLabel: string | undefined;
   if (day) {
-    const today = DAY_NAMES.indexOf(new Intl.DateTimeFormat("en-US", { timeZone: NEW_YORK, weekday: "long" }).format(receivedAt).toLowerCase());
-    const offset = day === "today" || day === "tonight" ? 0 : day === "tomorrow" ? 1 : (DAY_NAMES.indexOf(day) - today + 7) % 7 || 7;
-    dateLabel = newYorkDate(new Date(receivedAt.getTime() + offset * 24 * 60 * 60 * 1000));
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: NEW_YORK, year: "numeric", month: "numeric", day: "numeric" }).formatToParts(receivedAt);
+    const part = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((item) => item.type === type)!.value);
+    // Advance New York's calendar date, not elapsed hours across DST transitions.
+    const calendarDate = new Date(Date.UTC(part("year"), part("month") - 1, part("day")));
+    let offset = day === "today" || day === "tonight" ? 0 : day === "tomorrow" ? 1 : (DAY_NAMES.indexOf(day) - calendarDate.getUTCDay() + 7) % 7;
+    if (offset === 0 && new RegExp(`\\bnext\\s+${day}\\b`, "i").test(text)) offset = 7;
+    calendarDate.setUTCDate(calendarDate.getUTCDate() + offset);
+    dateLabel = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", month: "short", day: "numeric" }).format(calendarDate);
   }
   const timeLabel = clock ? `${Number(clock[1])}${clock[2] ? `:${clock[2]}` : ""} ${clock[3].toUpperCase()}M` : undefined;
   if (dateLabel && timeLabel) return `${dateLabel} at ${timeLabel}`;
@@ -144,14 +152,14 @@ export function scheduleLabel(text: string, receivedAt: Date): string | undefine
 // Keyword fallback used when Gemini is unavailable. It is intentionally conservative.
 export function classifyReplyByRules(body: string, receivedAt = new Date()): LandlordReplyClassification {
   const when = scheduleLabel(body, receivedAt);
+  if (body.includes("?")) return { intent: "question", summary: "The landlord asked a question that needs a tenant response.", source: "rules" };
+  if (REFUSAL.test(body)) return { intent: "refusal", summary: "The landlord declined or could not commit to a repair.", source: "rules" };
   if (COMPLETE.test(body) && !NOT_YET.test(body) && !body.includes("?")) {
     return { intent: "repair_complete", summary: "The landlord reported the repair complete.", source: "rules" };
   }
-  if (when || (SCHEDULING.test(body) && !REFUSAL.test(body))) {
+  if (REPAIR_VISIT.test(body) && SCHEDULE_COMMITMENT.test(body) && !NEGATED_SCHEDULE.test(body)) {
     return { intent: "scheduled", ...(when ? { scheduledFor: when } : {}), summary: `The landlord scheduled a repair visit${when ? ` for ${when}` : ""}.`, source: "rules" };
   }
-  if (REFUSAL.test(body)) return { intent: "refusal", summary: "The landlord declined or could not commit to a repair.", source: "rules" };
-  if (body.includes("?")) return { intent: "question", summary: "The landlord asked a question that needs a tenant response.", source: "rules" };
   return { intent: "other", summary: "The landlord replied without scheduling or completing a repair.", source: "rules" };
 }
 

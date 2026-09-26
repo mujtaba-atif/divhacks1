@@ -65,12 +65,14 @@ const REPLY_EVENT_TITLES: Record<LandlordReplyIntent, string> = {
 
 // A landlord reply can move the case into verification but never touches escrow; release still requires verified evidence.
 function applyLandlordReply(caseRecord: CaseRecord, body: string, delivery: CaseMessage["delivery"], classification: LandlordReplyClassification) {
-  if (caseRecord.messages.length >= 199) throw new ApiError(409, "This case has reached its demo message limit.");
+  const reportsNewCompletion = classification.intent === "repair_complete" && !caseRecord.repairReported;
+  const messageCount = reportsNewCompletion ? 2 : 1;
+  if (caseRecord.messages.length + messageCount > 200) throw new ApiError(409, "This case has reached its demo message limit.");
   caseRecord.messages.push({ id: randomUUID(), sender: "landlord", body, createdAt: now(), delivery, classification });
   const title = classification.intent === "scheduled" && classification.scheduledFor
     ? `Maintenance scheduled for ${classification.scheduledFor}`
     : REPLY_EVENT_TITLES[classification.intent];
-  if (classification.intent === "repair_complete" && !caseRecord.repairReported) {
+  if (reportsNewCompletion) {
     caseRecord.repairReported = true;
     invalidateVerification(caseRecord);
     caseRecord.messages.push({
@@ -298,6 +300,7 @@ async function applyAction(document: SessionDocument, caseRecord: CaseRecord, ac
       break;
     }
     case "record_landlord_reply": {
+      if (caseRecord.messages.length >= 200) throw new ApiError(409, "This case has reached its demo message limit.");
       const body = action.body.trim();
       applyLandlordReply(caseRecord, body, "demo", await classifyLandlordReply(body, caseRecord));
       break;
