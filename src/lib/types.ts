@@ -44,12 +44,22 @@ export interface EvidenceRecord {
   analysis?: EvidenceAnalysis;
 }
 
+export type LandlordReplyIntent = "scheduled" | "repair_complete" | "question" | "refusal" | "other";
+
+export interface LandlordReplyClassification {
+  intent: LandlordReplyIntent;
+  scheduledFor?: string;
+  summary: string;
+  source: "demo" | "rules" | "gemini";
+}
+
 export interface CaseMessage {
   id: string;
   sender: "tenant" | "agent" | "landlord";
   body: string;
   createdAt: string;
   delivery: "demo" | "sent" | "received";
+  classification?: LandlordReplyClassification;
 }
 
 export interface TimelineEvent {
@@ -221,6 +231,7 @@ export type CaseAction =
   | { action: "analyze_evidence"; evidenceId: string }
   | { action: "send_message"; body: string }
   | { action: "simulate_landlord_reply"; variant: "scheduled" | "completed" }
+  | { action: "record_landlord_reply"; body: string }
   | { action: "create_escrow" }
   | { action: "verify_repair" }
   | { action: "confirm_resolution" }

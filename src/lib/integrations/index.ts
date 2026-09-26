@@ -2,7 +2,7 @@ import type { IntegrationStatus } from "../types";
 import { assertServer } from "./shared";
 
 export { lookupBuilding } from "./nyc-open-data";
-export { analyzeEvidence, verifyEvidence } from "./gemini";
+export { analyzeEvidence, classifyLandlordReply, classifyReplyByRules, verifyEvidence } from "./gemini";
 export { getFinancialContext } from "./nessie";
 export { sendLandlordMessage } from "./photon";
 export { DeliveryUncertainError, IntegrationError } from "./shared";

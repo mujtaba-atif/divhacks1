@@ -3,6 +3,7 @@ import "server-only";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   analyzeEvidence,
+  classifyLandlordReply,
   getFinancialContext,
   IntegrationError,
   lookupBuilding,
@@ -16,8 +17,11 @@ import { createNewCase } from "@/lib/seed";
 import type {
   AuditRecord,
   CaseAction,
+  CaseMessage,
   CaseRecord,
   EvidenceRecord,
+  LandlordReplyClassification,
+  LandlordReplyIntent,
   PolicyResult,
   TimelineEvent,
   TransactionIntent,
@@ -49,6 +53,33 @@ function invalidateVerification(caseRecord: CaseRecord) {
   delete caseRecord.verification;
   caseRecord.tenantConfirmed = false;
   updateStatus(caseRecord);
+}
+
+const REPLY_EVENT_TITLES: Record<LandlordReplyIntent, string> = {
+  scheduled: "Repair visit scheduled",
+  repair_complete: "Repair reported complete",
+  question: "Landlord asked a question",
+  refusal: "Landlord declined the repair",
+  other: "Landlord replied",
+};
+
+// A landlord reply can move the case into verification but never touches escrow; release still requires verified evidence.
+function applyLandlordReply(caseRecord: CaseRecord, body: string, delivery: CaseMessage["delivery"], classification: LandlordReplyClassification) {
+  if (caseRecord.messages.length >= 199) throw new ApiError(409, "This case has reached its demo message limit.");
+  caseRecord.messages.push({ id: randomUUID(), sender: "landlord", body, createdAt: now(), delivery, classification });
+  const title = classification.intent === "scheduled" && classification.scheduledFor
+    ? `Maintenance scheduled for ${classification.scheduledFor}`
+    : REPLY_EVENT_TITLES[classification.intent];
+  if (classification.intent === "repair_complete" && !caseRecord.repairReported) {
+    caseRecord.repairReported = true;
+    invalidateVerification(caseRecord);
+    caseRecord.messages.push({
+      id: randomUUID(), sender: "agent", createdAt: now(), delivery: "demo",
+      body: "The landlord reported the repair complete. Please upload new evidence so the case can be verified.",
+    });
+  }
+  updateStatus(caseRecord);
+  event(caseRecord, title, body, "message");
 }
 
 function assertMutable(caseRecord: CaseRecord) {
@@ -257,18 +288,18 @@ async function applyAction(document: SessionDocument, caseRecord: CaseRecord, ac
       const completed = action.variant === "completed";
       if (completed && caseRecord.repairReported) return { case: caseRecord };
       if (!completed && caseRecord.repairReported) throw new ApiError(409, "The repair has already been reported complete.");
-      if (caseRecord.messages.length >= 200) throw new ApiError(409, "This case has reached its demo message limit.");
       const body = completed
         ? "Demo landlord reply: The heating repair is complete. Please check the apartment temperature and upload after-repair evidence."
         : "Demo landlord reply: A technician is scheduled to inspect and repair the heating system tomorrow morning.";
       if (caseRecord.messages.some((message) => message.sender === "landlord" && message.body === body)) return { case: caseRecord };
-      caseRecord.messages.push({ id: randomUUID(), sender: "landlord", body, createdAt: now(), delivery: "demo" });
-      if (completed) {
-        caseRecord.repairReported = true;
-        invalidateVerification(caseRecord);
-      }
-      updateStatus(caseRecord);
-      event(caseRecord, completed ? "Repair reported complete" : "Repair visit scheduled", body, "message");
+      applyLandlordReply(caseRecord, body, "demo", completed
+        ? { intent: "repair_complete", summary: "The landlord reported the repair complete.", source: "demo" }
+        : { intent: "scheduled", scheduledFor: "tomorrow morning", summary: "The landlord scheduled a repair visit for tomorrow morning.", source: "demo" });
+      break;
+    }
+    case "record_landlord_reply": {
+      const body = action.body.trim();
+      applyLandlordReply(caseRecord, body, "demo", await classifyLandlordReply(body, caseRecord));
       break;
     }
     case "create_escrow": {
