@@ -6,6 +6,8 @@ import path from "node:path";
 import { MongoClient } from "mongodb";
 import { createDemoCase } from "@/lib/seed";
 import type { CaseRecord } from "@/lib/types";
+import type { RegisteredUser } from "./auth";
+import type { DigitalContract } from "./contracts";
 import { ApiError } from "./errors";
 
 export interface SessionDocument {
@@ -17,6 +19,9 @@ export interface SessionDocument {
   simulatedDebitsCents: number;
   cases: CaseRecord[];
   uncertainDeliveries?: { caseId: string; messageHash: string; createdAt: string }[];
+  /** Optional so existing anonymous demo sessions retain their original shape. */
+  users?: RegisteredUser[];
+  contracts?: DigitalContract[];
 }
 
 const sharedRuntime = globalThis as typeof globalThis & { rentEscrowSessionLocks?: Map<string, Promise<void>> };
