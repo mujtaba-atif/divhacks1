@@ -1,4 +1,5 @@
 import type { BuildingRecord, CaseRecord, IssueType } from "./types";
+import { demoFinancialProfile, demoRentHistory } from "./financial-fixture";
 
 const at = (daysAgo = 0, hour = 10) => {
   const date = new Date();
@@ -62,6 +63,7 @@ export function createNewCase(ownerId: string, input: NewCaseInput): CaseRecord 
     status: "open", apartment: input.apartment, landlordName: input.landlordName,
     landlordContact: input.landlordContact, monthlyRentCents: input.monthlyRentCents,
     disputedAmountCents: input.disputedAmountCents, accountBalanceCents: 245000,
+    financialProfile: demoFinancialProfile(ownerId, id),
     building: input.building ?? {
       address: input.address, borough: input.borough, zip: "", source: "nyc-open-data",
       fetchedAt: now, complaints: [], violations: [], warning: "Building history has not been fetched yet.",
@@ -84,6 +86,7 @@ export function createDemoCase(ownerId: string): CaseRecord {
     disputedAmountCents: 40000, building: demoBuilding(),
   });
   record.id = "RE-1042";
+  record.financialProfile = demoFinancialProfile(ownerId, record.id);
   record.escrow.id = "ESC-RE-1042";
   record.createdAt = at(3, 9);
   record.updatedAt = at(0, 9);
@@ -102,15 +105,7 @@ export function createDemoCase(ownerId: string): CaseRecord {
     { id: "DEMO-T-2", title: "Initial evidence added", detail: "Sample thermometer photo records 54 F.", createdAt: at(3, 10), kind: "evidence" },
     { id: "DEMO-T-3", title: "Evidence summary prepared", detail: "Heating issue identified in demo analysis. Repair is still unverified.", createdAt: at(3, 11), kind: "evidence" },
   ];
-  record.expenses = [
-    { id: "DEMO-EXP-1", label: "Portable space heater", amountCents: 4799, date: at(2), category: "Equipment", source: "demo" },
-    { id: "DEMO-EXP-2", label: "Additional electricity", amountCents: 2400, date: at(1), category: "Utilities", source: "demo" },
-    { id: "DEMO-EXP-3", label: "Temporary accommodation", amountCents: 11000, date: at(1), category: "Accommodation", source: "demo" },
-  ];
-  record.rentHistory = [
-    { id: "DEMO-RENT-1", month: "August 2026", amountCents: 185000, status: "paid", source: "demo" },
-    { id: "DEMO-RENT-2", month: "September 2026", amountCents: 185000, status: "paid", source: "demo" },
-    { id: "DEMO-RENT-3", month: "October 2026", amountCents: 185000, status: "upcoming", source: "demo" },
-  ];
+  record.expenses = [];
+  record.rentHistory = demoRentHistory();
   return record;
 }
