@@ -78,11 +78,16 @@ are always read back, never inferred from seed requests.
    `account.customer_id`; validate balance and all transaction account IDs.
 4. Evaluate deterministic policy against a server-constructed intent. Claimed
    IDs from untrusted text cannot replace the binding, amount, wallet, or escrow.
-5. Permit only the requested simulated action after all checks pass. Isolated
-   XRPL testnet tooling additionally refreshes Nessie immediately before signing.
+5. Permit only the requested action after all checks pass. Application XRPL
+   Payment settlement refreshes the financial profile before authorization and
+   rechecks its freshness immediately before signing. Isolated native escrow
+   tooling additionally refreshes Nessie immediately before signing.
 
 Verification expires after 60 seconds and is refreshed before financial
-authorization. Testnet tooling rejects demo fixtures. Missing configuration,
+authorization. The isolated native escrow tooling requires API-backed Nessie
+verification. The application's separate Testnet Payment flow permits labeled
+demo financial context when Nessie is disabled and the case has no live binding.
+Missing configuration for an enabled provider,
 timeouts, missing records, mismatches, invalid amounts/IDs, duplicate records,
 and malformed responses fail closed with explicit reason codes. No live-bound
 case falls back to fixtures. Provider URLs contain a query key per Nessie's API

@@ -20,7 +20,7 @@ export default defineConfig({
     reuseExistingServer: false,
     env: {
       RENTESCROW_STORAGE: "local", NESSIE_ENABLED: "false", GEMINI_API_KEY: "",
-      PHOTON_LIVE_SEND: "false", XRPL_TESTNET_ENABLED: "false",
+      PHOTON_LIVE_SEND: "false", XRPL_TESTNET_ENABLED: "false", XRPL_SETTLEMENT_ENABLED: "false",
     },
     timeout: 120_000,
   },

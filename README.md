@@ -2,7 +2,8 @@
 
 A tenant case workspace for the DivHacks 2026 no-heat demonstration. Building
 records, evidence, landlord messages, expenses, repair verification, and a
-guarded simulated escrow stay together in one persistent case.
+guarded simulated USD escrow stay together in one persistent case. An optional,
+case-bound XRPL Testnet Payment provides real on-chain settlement using Test XRP.
 
 ## Run locally
 
@@ -49,7 +50,30 @@ limitations.
 | Nessie | Verified sandbox customer/account binding, rent history, tenant-reviewed costs, and account-substitution guardrail |
 | Photon | Opt-in approved-recipient outbound iMessage; demo replies by default |
 | MongoDB Atlas | Session records and GridFS uploads when configured; local atomic JSON persistence by default |
-| XRPL | Isolated, guarded testnet tooling; application escrow is always simulated USD |
+| XRPL | Guarded real Testnet Payment settlement; application escrow remains simulated USD |
+
+## XRP Testnet demo
+
+```sh
+pnpm xrpl:setup-testnet
+pnpm dev
+```
+
+The one-time setup creates and faucet-funds dedicated tenant and landlord
+Testnet wallets, saves only the tenant signing seed to ignored `.env.local`,
+and preserves existing wallets when rerun. Use `npm run xrpl:setup-testnet` if
+pnpm is unavailable and dependencies are already installed.
+
+In Escrow, set aside the simulated $400 and select **Enable Testnet settlement**.
+Complete the repair verification and tenant confirmation, then review and approve
+the separate **10 Test XRP** payment. This amount is configurable and has no USD
+exchange-rate relationship. Only a validated `tesSUCCESS` receipt closes the case.
+The compromised-agent controls demonstrate wallet switching, amount tampering,
+prompt injection, insufficient funds, replay, wrong network/case, and unsupported
+actions without signing or submitting anything.
+
+See [XRP implementation and judge walkthrough](docs/xrpl-demo.md) for the live
+transaction proof, public wallet addresses, configuration, recovery, and limits.
 
 For Atlas, follow [database setup](docs/mongodb-atlas.md), then run
 `pnpm db:check` to verify indexes and a temporary write/read/delete probe.
@@ -86,6 +110,8 @@ validation, Nessie ownership and stale verification, confirmed-cost deduplicatio
 provider corrections, account substitution, and the full repair-to-settlement
 flow. Nessie browser tests intercept the API and exercise failure states without
 mutating provider data.
+XRP tests additionally cover transaction tampering, reserve/fee checks, delivered
+amount validation, durable pending receipts, recovery, and duplicate prevention.
 
 ## Structure
 
@@ -93,6 +119,7 @@ mutating provider data.
 - `src/app/api`: session-scoped HTTP routes.
 - `src/lib/server`: persistence, validation, and case state transitions.
 - `src/lib/integrations`: provider adapters and isolated XRPL testnet tooling.
+- `scripts/xrpl-setup-testnet.ts`: one-time Testnet wallet setup.
 - `src/lib/policy.ts`: deterministic escrow authorization.
 - `tests`: policy, integration, API, and browser verification.
 - `.codex/agents`: the installed VoltAgent specialist profiles.
@@ -105,8 +132,9 @@ delivery/reconciliation handling.
 
 ## Scope
 
-Implemented from the original 16-page planning PDF and the eight-page Nessie
-integration addendum supplied on September 26, 2026.
+Implemented from the original 16-page planning PDF, the eight-page Nessie
+integration addendum, and the 27-page XRP follow-up supplied on September 26,
+2026. The XRP flow uses its permitted Payment fallback.
 [Implementation contract](docs/implementation-contract.md) records the shared
 API and state invariants. [Asset provenance](docs/asset-provenance.md) records the
 generated demonstration images. This prototype organizes evidence and demonstrates

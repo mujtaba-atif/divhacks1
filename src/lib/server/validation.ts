@@ -48,6 +48,13 @@ export const actionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("verify_repair") }).strict(),
   z.object({ action: z.literal("confirm_resolution") }).strict(),
   z.object({ action: z.literal("release_escrow") }).strict(),
+  z.object({ action: z.literal("enable_xrpl") }).strict(),
+  z.object({ action: z.literal("settle_xrpl") }).strict(),
+  z.object({ action: z.literal("reconcile_xrpl") }).strict(),
+  z.object({ action: z.literal("xrpl_security_demo"), scenario: z.enum([
+    "wallet_switch", "amount_tamper", "prompt_injection", "insufficient_funds",
+    "duplicate", "wrong_network", "wrong_case", "unsupported_action",
+  ]) }).strict(),
   z.object({ action: z.literal("add_expense"), label: text(160), amountCents: cents, category: text(80) }).strict(),
   z.object({ action: z.literal("sync_finances") }).strict(),
   z.object({ action: z.literal("confirm_transaction"), transactionId: text(160) }).strict(),

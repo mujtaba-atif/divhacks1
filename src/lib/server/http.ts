@@ -59,7 +59,11 @@ export function respond(data: unknown, session?: SessionContext, status = 200) {
 }
 
 export function handleError(error: unknown, session?: SessionContext) {
-  if (error instanceof ApiError) return respond({ error: error.message }, session, error.status);
+  if (error instanceof ApiError) {
+    return respond({ error: error.message, ...(error.code ? { code: error.code } : {}),
+      ...(error.policy ? { policy: error.policy } : {}),
+      ...(error.caseRecord ? { case: error.caseRecord } : {}) }, session, error.status);
+  }
   if (error instanceof IntegrationError) {
     const status = error.code === "invalid_input" ? 400 : error.code === "rejected" ? 409
       : error.code === "invalid_response" ? 502 : 503;

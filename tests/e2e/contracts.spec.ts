@@ -1,7 +1,5 @@
 import { expect, test } from "@playwright/test";
 
-import { origin } from "./environment";
-
 const caseInput = {
   issue: "heating", description: "The radiator has stopped producing heat in this apartment.",
   noticedAt: "2026-09-23", address: "123 Example Street", borough: "Brooklyn",
@@ -9,7 +7,8 @@ const caseInput = {
   monthlyRentCents: 300_000, disputedAmountCents: 40_000,
 };
 
-test("self-documentation policy rejects and audits an empty-destination transfer via HTTP", async ({ request }) => {
+test("self-documentation policy rejects and audits an empty-destination transfer via HTTP", async ({ request, baseURL }) => {
+  const origin = new URL(baseURL!).origin;
   const tenant = await request.post("/api/auth/register", {
     headers: { Origin: origin }, data: { role: "tenant", displayName: "Taylor Tenant", walletAddress: "rTENANT789" },
   });
