@@ -33,6 +33,7 @@ function actionMessage(action: CaseAction, record: CaseRecord, policy?: PolicyRe
     case "analyze_evidence": return "Evidence analysis added to the case record.";
     case "send_message": return "Your approved message was recorded.";
     case "simulate_landlord_reply": return action.variant === "completed" ? "Sample repair completion recorded. Add and analyze after-repair evidence next." : "Sample repair appointment recorded.";
+    case "record_landlord_reply": return `Landlord reply recorded: ${record.timeline.at(-1)?.title ?? "case updated"}.`;
     case "create_escrow": return `${money(record.escrow.amountCents)} set aside in simulated escrow.`;
     case "verify_repair": return record.verification?.verified ? "Repair verification passed. Your confirmation is the next step." : "Verification needs further evidence. Review the analysis before continuing.";
     case "confirm_resolution": return "Your repair confirmation has been recorded.";

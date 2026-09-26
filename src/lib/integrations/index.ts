@@ -3,7 +3,7 @@ import { assertServer } from "./shared";
 import { getXrplConfig } from "./xrpl-settlement";
 
 export { lookupBuilding } from "./nyc-open-data";
-export { analyzeEvidence, verifyEvidence } from "./gemini";
+export { analyzeEvidence, classifyLandlordReply, classifyReplyByRules, verifyEvidence } from "./gemini";
 export { getFinancialContext } from "./nessie";
 export { sendLandlordMessage } from "./photon";
 export { DeliveryUncertainError, IntegrationError } from "./shared";

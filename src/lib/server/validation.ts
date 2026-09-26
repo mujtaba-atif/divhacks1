@@ -43,6 +43,7 @@ export const actionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("analyze_evidence"), evidenceId: text(120) }).strict(),
   z.object({ action: z.literal("send_message"), body: text(5_000) }).strict(),
   z.object({ action: z.literal("simulate_landlord_reply"), variant: z.enum(["scheduled", "completed"]) }).strict(),
+  z.object({ action: z.literal("record_landlord_reply"), body: text(2_000) }).strict(),
   z.object({ action: z.literal("create_escrow") }).strict(),
   z.object({ action: z.literal("verify_repair") }).strict(),
   z.object({ action: z.literal("confirm_resolution") }).strict(),
