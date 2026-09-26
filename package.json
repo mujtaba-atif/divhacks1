@@ -10,6 +10,7 @@
     "db:check": "node --conditions=react-server --import tsx scripts/check-mongodb.ts",
     "nessie:check": "node --conditions=react-server --import tsx scripts/check-nessie.ts",
     "nessie:seed": "node --import tsx scripts/seed-nessie-demo.ts",
+    "agent": "node --import tsx scripts/spectrum-agent.ts",
     "test": "node --conditions=react-server --import tsx --test tests/*.test.ts",
     "test:e2e": "playwright test"
   },
@@ -20,6 +21,7 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "server-only": "^0.0.1",
+    "spectrum-ts": "^12.10.1",
     "xrpl": "^4.4.0",
     "zod": "^3.24.0"
   },
