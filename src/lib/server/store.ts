@@ -3,11 +3,13 @@ import "server-only";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, open, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { MongoClient } from "mongodb";
 import { createDemoCase } from "@/lib/seed";
 import type { CaseRecord } from "@/lib/types";
+import type { RegisteredUser } from "./auth";
+import type { DigitalContract } from "./contracts";
 import { ApiError } from "./errors";
 import { readXrplJournal } from "./xrpl-journal";
+import { assertSessionSize, readMongoSession, saveMongoSession } from "./mongodb-store";
 
 export interface SessionDocument {
   ownerId: string;
@@ -18,32 +20,20 @@ export interface SessionDocument {
   simulatedDebitsCents: number;
   cases: CaseRecord[];
   uncertainDeliveries?: { caseId: string; messageHash: string; createdAt: string }[];
+  /** Optional so existing anonymous demo sessions retain their original shape. */
+  users?: RegisteredUser[];
+  contracts?: DigitalContract[];
 }
 
 const sharedRuntime = globalThis as typeof globalThis & { rentEscrowLocks?: Map<string, Promise<void>> };
 const runtimeLocks = sharedRuntime.rentEscrowLocks ??= new Map<string, Promise<void>>();
-let mongoClient: Promise<MongoClient> | undefined;
 const dataDirectory = path.join(process.cwd(), ".data", "sessions");
 const lockDirectory = path.join(process.cwd(), ".data", "locks");
 
 function mongoEnabled() {
-  return process.env.RENTESCROW_STORAGE === "mongodb";
-}
-
-async function collection() {
-  if (!process.env.MONGODB_URI) {
-    throw new ApiError(503, "MongoDB storage is selected but MONGODB_URI is missing.");
-  }
-  if (!mongoClient) {
-    const connection = new MongoClient(process.env.MONGODB_URI, {
-      serverSelectionTimeoutMS: 5_000,
-      connectTimeoutMS: 5_000,
-    }).connect();
-    mongoClient = connection;
-    connection.catch(() => { mongoClient = undefined; });
-  }
-  const client = await mongoClient;
-  return client.db(process.env.MONGODB_DATABASE || "rentescrow").collection<SessionDocument>("sessions");
+  const mode = process.env.RENTESCROW_STORAGE || "local";
+  if (mode !== "local" && mode !== "mongodb") throw new ApiError(503, "RENTESCROW_STORAGE must be local or mongodb.");
+  return mode === "mongodb";
 }
 
 function filename(ownerId: string) {
@@ -53,8 +43,7 @@ function filename(ownerId: string) {
 
 export async function readSession(ownerId: string): Promise<SessionDocument | null> {
   if (mongoEnabled()) {
-    const document = await (await collection()).findOne({ ownerId }, { projection: { _id: 0 } });
-    return document as SessionDocument | null;
+    return readMongoSession(ownerId);
   }
   try {
     return JSON.parse(await readFile(filename(ownerId), "utf8")) as SessionDocument;
@@ -66,25 +55,11 @@ export async function readSession(ownerId: string): Promise<SessionDocument | nu
 
 async function saveSession(document: SessionDocument, expectedRevision?: number) {
   document.updatedAt = new Date().toISOString();
-  const serialized = JSON.stringify(document);
-  const maximum = (mongoEnabled() ? 12 : 32) * 1024 * 1024;
-  if (Buffer.byteLength(serialized) > maximum) {
-    throw new ApiError(413, "This demo session has reached its evidence storage limit. Export your cases and reset the demo to continue.");
-  }
+  assertSessionSize(document);
   if (mongoEnabled()) {
-    const sessions = await collection();
-    if (expectedRevision === undefined) {
-      await sessions.insertOne(document);
-    } else {
-      const result = await sessions.replaceOne(
-        { ownerId: document.ownerId, revision: expectedRevision }, document,
-      );
-      if (result.matchedCount !== 1) {
-        throw new ApiError(409, "This session changed in another request. Refresh and try again.");
-      }
-    }
-    return;
+    return saveMongoSession(document, expectedRevision);
   }
+  const serialized = JSON.stringify(document);
   await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
   const target = filename(document.ownerId);
   const temporary = `${target}.${randomBytes(8).toString("hex")}.tmp`;

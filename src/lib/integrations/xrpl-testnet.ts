@@ -5,6 +5,7 @@ import { z } from "zod";
 import { evaluatePolicy } from "../policy";
 import type { CaseRecord, TransactionIntent } from "../types";
 import { assertServer, IntegrationError } from "./shared";
+import { getFinancialContext } from "./nessie";
 
 export const XRPL_TESTNET_URL = "wss://s.altnet.rippletest.net:51233";
 const MAX_FEE_DROPS = 1000n;
@@ -167,6 +168,8 @@ export async function submitGuardedTestnetEscrow(intent: TransactionIntent, cont
     const preimageHex = process.env.XRPL_TESTNET_PREIMAGE_HEX;
     if (!seed || !preimageHex) reject("Testnet signing credentials and a unique escrow preimage are required.");
     const record = await context.loadCase(intent.caseId);
+    const initialRecord = structuredClone(record);
+    record.financialProfile = (await getFinancialContext(record)).profile;
     assertCaseApproval(record, intent, approval);
     const wallet = Wallet.fromSeed(seed);
     if (wallet.classicAddress !== approval.ownerAddress) reject("The configured wallet is not the approved escrow owner.");
@@ -214,8 +217,9 @@ export async function submitGuardedTestnetEscrow(intent: TransactionIntent, cont
       feeDrops: prepared.Fee!, amountDrops: approval.amountDrops, creating: expected.TransactionType === "EscrowCreate",
     });
     const freshRecord = await context.loadCase(intent.caseId);
+    if (JSON.stringify(freshRecord) !== JSON.stringify(initialRecord)) reject("The case changed while the transaction was being prepared. Review it and retry.");
+    freshRecord.financialProfile = (await getFinancialContext(freshRecord)).profile;
     assertCaseApproval(freshRecord, intent, approval);
-    if (JSON.stringify(freshRecord) !== JSON.stringify(record)) reject("The case changed while the transaction was being prepared. Review it and retry.");
     // Nothing may edit the transaction between final policy validation and signing.
     const signed = wallet.sign(prepared);
     const decoded = decode(signed.tx_blob) as unknown as EscrowCreate | EscrowFinish;

@@ -18,7 +18,9 @@ import {
   type XrplPending,
   type XrplReceipt,
 } from "@/lib/integrations/xrpl-settlement";
-import { evaluatePolicy, evaluateXrplPolicy, makeIntent, makeXrplIntent } from "@/lib/policy";
+import { evaluateFinancialBinding, evaluatePolicy, evaluateXrplPolicy, makeIntent, makeXrplIntent } from "@/lib/policy";
+import { demoFinancialProfile } from "@/lib/financial-fixture";
+import { NessieError, resolveFinancialBinding } from "@/lib/integrations/nessie";
 import { createNewCase } from "@/lib/seed";
 import type {
   AuditRecord,
@@ -218,8 +220,52 @@ function throwXrplError(caseRecord: CaseRecord, intent: XrplSettlementIntent, er
 function financialFailure(caseRecord: CaseRecord, intent: TransactionIntent, policy: PolicyResult): never {
   const reason = policy.checks.filter((check) => !check.passed).map((check) => check.detail).join(" ");
   const action = intent.transactionType === "EscrowCreate" ? "EscrowCreate" : "EscrowFinish";
-  appendAudit(caseRecord, intent, "rejected", reason || "Policy rejected this transaction.", action);
-  throw new ApiError(409, reason || "The transaction did not pass escrow policy checks.", true);
+  const detail = `${policy.reasonCodes?.join(", ") || "POLICY_REJECTED"}: ${reason || "Policy rejected this transaction."}`;
+  appendAudit(caseRecord, intent, "rejected", detail, action);
+  throw new ApiError(409, detail, true);
+}
+
+async function refreshFinancialProfile(caseRecord: CaseRecord): Promise<void> {
+  const previous = caseRecord.financialProfile;
+  try {
+    const context = await getFinancialContext(caseRecord);
+    const sameBinding = previous?.binding.source === context.profile.binding.source
+      && previous.binding.accountId === context.profile.binding.accountId && previous.binding.customerId === context.profile.binding.customerId;
+    const reviewed = new Map((sameBinding ? previous.transactions : []).filter((item) => item.relatedStatus !== "suggested" && item.source === context.profile.binding.source).map((item) => [item.id, item]));
+    context.profile.transactions = context.profile.transactions.map((item) => {
+      const prior = reviewed.get(item.id);
+      if (!prior) return item;
+      const confirmed = caseRecord.expenses.find((expense) => expense.transactionId === item.id);
+      const changed = prior.relatedStatus === "confirmed" && confirmed && (confirmed.amountCents !== item.amountCents
+        || confirmed.label !== item.label || confirmed.date !== item.date || confirmed.category !== item.category);
+      return { ...item, relatedStatus: prior.relatedStatus,
+        ...(confirmed ? { confirmedAmountCents: confirmed.amountCents } : {}),
+        ...(changed ? { providerStatus: "changed" as const,
+          reviewNote: `The provider changed this transaction. The original tenant-confirmed issue cost remains ${(confirmed.amountCents / 100).toFixed(2)} USD; this refreshed amount has not replaced it.` } : {}),
+      };
+    });
+    for (const item of reviewed.values()) {
+      if (!context.profile.transactions.some((current) => current.id === item.id)) {
+        const confirmed = caseRecord.expenses.find((expense) => expense.transactionId === item.id);
+        context.profile.transactions.push({ ...item, providerStatus: "missing",
+          ...(confirmed ? { confirmedAmountCents: confirmed.amountCents } : {}),
+          reviewNote: "Archived review snapshot. This transaction is no longer returned in the provider's completed purchases. Any previously confirmed issue cost is retained unchanged, not reverified." });
+      }
+    }
+    caseRecord.financialProfile = context.profile;
+    caseRecord.rentHistory = context.rentHistory;
+    // Legacy automatic imports were never tenant-confirmed issue costs.
+    caseRecord.expenses = caseRecord.expenses.filter((item) => item.source !== "nessie" || !!item.transactionId);
+  } catch (error) {
+    if (!(error instanceof NessieError)) throw error;
+    let binding = previous?.binding ?? demoFinancialProfile(caseRecord.ownerId, caseRecord.id).binding;
+    try { binding = resolveFinancialBinding(caseRecord); } catch { /* Retain the rejected binding for inspection. */ }
+    caseRecord.financialProfile = {
+      binding, status: ["NESSIE_NOT_CONFIGURED", "NESSIE_API_UNAVAILABLE"].includes(error.reasonCode) ? "unavailable" : "rejected",
+      reasonCode: error.reasonCode, detail: error.message, checkedAt: new Date().toISOString(),
+      customerVerified: false, accountVerified: false, ownershipVerified: false, transactions: previous?.transactions ?? [],
+    };
+  }
 }
 
 // Only this boundary can mint a simulated transaction result, using the exact reviewed intent.
@@ -242,6 +288,34 @@ export async function createCase(ownerId: string, input: z.infer<typeof newCaseS
     const caseRecord = createNewCase(ownerId, { ...input, building });
     caseRecord.accountBalanceCents = document.accountBalanceCents;
     document.cases.push(caseRecord);
+    return caseRecord;
+  });
+}
+
+/** Creates a case only after contracts.ts has checked the current session's acceptance record. */
+export async function createContractCase(
+  ownerId: string,
+  input: z.infer<typeof newCaseSchema>,
+  contractId: string,
+) {
+  const building = await lookupBuilding(input.address, input.borough);
+  return mutateSession(ownerId, async (document) => {
+    await assertSessionNoPendingSettlement(document);
+    if (document.cases.length >= 20) throw new ApiError(409, "This demo allows up to 20 cases per session.");
+    const contract = document.contracts?.find((item) => item.id === contractId);
+    if (!contract || contract.status !== "active" || contract.caseId) {
+      throw new ApiError(409, "A fully accepted unused contract is required before creating a case.");
+    }
+    const caseRecord = createNewCase(ownerId, { ...input, building });
+    caseRecord.case_type = contract.case_type;
+    if (contract.case_type === "self_documentation") {
+      // No destination wallet is recorded or approved for a tenant-only case.
+      caseRecord.escrow.destination = "";
+    }
+    caseRecord.accountBalanceCents = document.accountBalanceCents;
+    document.cases.push(caseRecord);
+    contract.status = "used";
+    contract.caseId = caseRecord.id;
     return caseRecord;
   });
 }
@@ -304,6 +378,11 @@ async function applyAction(
   if (action.action === "settle_xrpl") {
     const settlement = caseRecord.xrplSettlement;
     if (!settlement) throw new ApiError(409, "Enable XRPL Testnet settlement first.", false, "XRPL_NOT_ENABLED");
+    if (settlement.status !== "pending" && settlement.status !== "validated") {
+      // Refresh trusted customer/account ownership at the last server boundary before policy and signing.
+      // The adapter rechecks the resulting immutable snapshot immediately before it signs.
+      await refreshFinancialProfile(caseRecord);
+    }
     return withXrplWalletLock(settlement.source, async () => {
       const journal = await readXrplJournal(settlement);
       if (journal?.status === "validated" && journal.receipt) {
@@ -474,6 +553,7 @@ async function applyAction(
     }
     case "create_escrow": {
       if (caseRecord.escrow.status === "locked") return { case: caseRecord };
+      await refreshFinancialProfile(caseRecord);
       caseRecord.accountBalanceCents = document.accountBalanceCents;
       const intent = Object.freeze(makeIntent(caseRecord, "EscrowCreate"));
       const policy = evaluatePolicy(caseRecord, intent);
@@ -522,6 +602,7 @@ async function applyAction(
       break;
     }
     case "release_escrow": {
+      await refreshFinancialProfile(caseRecord);
       if (caseRecord.xrplSettlement && caseRecord.xrplSettlement.status !== "validated") {
         const intent = makeXrplIntent(caseRecord);
         const evaluated = evaluateXrplPolicy(caseRecord, intent, document.ownerId);
@@ -579,17 +660,57 @@ async function applyAction(
       break;
     }
     case "sync_finances": {
-      const context = await getFinancialContext();
-      if (!Number.isSafeInteger(context.accountBalanceCents) || context.accountBalanceCents < 0) {
-        throw new ApiError(502, "The financial provider returned an invalid account balance.");
-      }
-      updateSharedBalance(document, Math.max(0, context.accountBalanceCents - document.simulatedDebitsCents));
-      caseRecord.expenses = [...context.expenses, ...caseRecord.expenses.filter((expense) => expense.source === "manual")];
-      caseRecord.rentHistory = context.rentHistory;
-      event(caseRecord, "Financial context refreshed", "Account context refreshed; simulated escrow debits remain deducted from the available balance.", "case");
+      await refreshFinancialProfile(caseRecord);
+      event(caseRecord, caseRecord.financialProfile?.status === "verified" ? "Financial context refreshed" : "Financial context unavailable",
+        caseRecord.financialProfile!.detail, "case");
       break;
     }
+    case "confirm_transaction":
+    case "dismiss_transaction": {
+      const transaction = caseRecord.financialProfile?.transactions.find((item) => item.id === action.transactionId);
+      if (!transaction) throw new ApiError(404, "Transaction not found in this case's financial profile.");
+      const status = action.action === "confirm_transaction" ? "confirmed" : "dismissed";
+      if (transaction.relatedStatus === status) return { case: caseRecord };
+      if (transaction.relatedStatus !== "suggested") throw new ApiError(409, "This transaction has already been reviewed.");
+      const profile = caseRecord.financialProfile!;
+      if (profile.status !== "verified" || !profile.customerVerified || !profile.accountVerified || !profile.ownershipVerified
+        || !profile.expiresAt || !Number.isFinite(Date.parse(profile.expiresAt)) || Date.parse(profile.expiresAt) <= Date.now()) {
+        throw new ApiError(409, "NESSIE_VERIFICATION_STALE: Refresh the financial profile before reviewing transactions.");
+      }
+      const binding = resolveFinancialBinding(caseRecord);
+      if (binding.tenantId !== profile.binding.tenantId || binding.caseId !== profile.binding.caseId
+        || binding.customerId !== profile.binding.customerId || binding.accountId !== profile.binding.accountId
+        || binding.source !== profile.binding.source || transaction.source !== binding.source || transaction.providerStatus === "missing") {
+        throw new ApiError(409, "NESSIE_ACCOUNT_MISMATCH: This transaction is not from the current approved financial binding. Refresh the financial profile.");
+      }
+      if (status === "confirmed") {
+        if (caseRecord.expenses.length >= 200) throw new ApiError(409, "This case has reached its expense limit.");
+        if (!caseRecord.expenses.some((item) => item.transactionId === transaction.id)) {
+          caseRecord.expenses.push({ id: randomUUID(), transactionId: transaction.id, label: transaction.label,
+            amountCents: transaction.amountCents, date: transaction.date, category: transaction.category, source: transaction.source });
+        }
+      }
+      transaction.relatedStatus = status;
+      event(caseRecord, status === "confirmed" ? "Issue cost confirmed" : "Transaction dismissed",
+        `${transaction.label}: ${(transaction.amountCents / 100).toFixed(2)} USD. ${status === "confirmed" ? "Tenant confirmed its connection to this issue." : "Excluded from issue impact."} No funds moved.`, "case");
+      break;
+    }
+    case "check_financial_binding": {
+      await refreshFinancialProfile(caseRecord);
+      const intent = makeIntent(caseRecord, caseRecord.escrow.status === "unfunded" ? "EscrowCreate" : "EscrowFinish");
+      if (action.scenario === "substitution") {
+        intent.nessieCustomerId = "customer_attacker";
+        intent.nessieAccountId = "account_bad";
+      }
+      const policy = evaluateFinancialBinding(caseRecord, intent);
+      const detail = `Financial binding dry run (${action.scenario}). ${policy.reasonCodes?.join(", ") || "Binding verified"}. No settlement action initiated.`;
+      if (!caseRecord.escrow.audit.some((item) => item.action === "PolicyCheck" && item.detail === detail)) {
+        appendAudit(caseRecord, intent, policy.approved ? "validated" : "rejected", detail, "PolicyCheck");
+      }
+      return { case: caseRecord, policy };
+    }
     case "policy_check": {
+      await refreshFinancialProfile(caseRecord);
       const policy = evaluatePolicy(caseRecord, action.intent);
       appendAudit(caseRecord, action.intent, policy.approved ? "validated" : "rejected",
         `Dry run only. ${policy.checks.filter((check) => !check.passed).map((check) => check.detail).join(" ") || "All policy checks passed; no transaction was submitted."}`,

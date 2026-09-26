@@ -87,3 +87,59 @@ Overview, Evidence, Messages, Finances, Escrow. Timeline and release checklist;
 file upload, sample evidence, real building search, new-case form, case switcher,
 export, reset. Clearly mark sample data and simulated funds. No legal promises.
 Mobile layout must preserve all actions. Use lucide-react icons.
+
+## Additive registration and contract approach
+
+Registration remains optional and is bound to the existing server-issued
+`rentescrow_session` cookie's owner ID; it neither replaces that cookie nor
+changes the anonymous dashboard bootstrap. A registered profile and accepted
+contract metadata are persisted with the same server-side session document.
+The existing `POST /api/cases` path remains the anonymous/demo-compatible path.
+New registered-contract case creation is exposed through a separate route and
+requires a stored acceptance of a canonical SHA-256 hash of the supplied terms.
+
+XRPL signing stays server-only: the application Payment action uses the configured
+Testnet wallet, and the separate native escrow module remains operator tooling.
+Neither accepts a user-supplied private key. Contract acknowledgement stores the
+canonical terms hash and acceptance record. A self-documentation case has no approved
+destination wallet. It records documentation only; policy rejects every
+caller-supplied transfer intent before any funds action.
+
+## Registration and digital contract HTTP contract
+
+All routes below preserve the normal JSON failure shape `{ error: string }` and
+the existing same-origin requirement for mutations. They use the existing
+`rentescrow_session` cookie and do not create a replacement authentication
+cookie.
+
+- `POST /api/auth/register` -> `{ user: RegisteredUser }`; body
+  `{ role: "tenant" | "landlord", displayName, email?, walletAddress? }`.
+  Registration upserts that role within the current demo session. A supplied
+  wallet address is descriptive only; wallet ownership is not proven.
+- `GET /api/auth/me` -> `{ users: RegisteredUser[] }` for the current session.
+- `GET /api/contracts` -> `{ contracts: DigitalContract[] }` for the current
+  session.
+- `POST /api/contracts` -> `{ contract: DigitalContract }`; body
+  `{ case_type: "bilateral" | "self_documentation", terms }`. A tenant must
+  already be registered. The server stores a SHA-256 hash of canonical terms
+  and the tenant's stored acceptance. A bilateral contract is
+  `pending_landlord`; a self-documentation contract is tenant-only and active.
+- `POST /api/contracts/:id/accept` -> `{ contract: DigitalContract }`; body
+  `{ role: "tenant" | "landlord" }`. The relevant role must be registered in
+  the same demo session. A landlord acceptance activates a bilateral contract;
+  landlord acceptance on a self-documentation contract is rejected.
+- `POST /api/contracts/cases` -> `{ case: CaseRecord }`; body
+  `{ contractId, case: <the existing POST /api/cases payload> }`. The contract
+  must be active, fully accepted for its type, and unused; consumption and case
+  creation are one session mutation. `landlordName` and `landlordContact` are
+  required for bilateral contracts but may be empty for self-documentation.
+
+`CaseRecord.case_type` is optional for legacy demo records and is
+`"bilateral"` or `"self_documentation"` for contract-created cases. Legacy
+unset behavior is bilateral behavior. A self-documentation case has an empty
+`escrow.destination` (no approved landlord or tenant wallet). It supports no
+escrow funding, fund release, or other transfer intent: `EscrowCreate`,
+`EscrowFinish`, and any forged/different intent are rejected and audited by the
+existing actions boundary. For example, RE-2091 can be
+recorded as `case_type: "self_documentation"` with tenant wallet
+`rTENANT789`, no approved landlord, and a rejected attempted $400 self-release.

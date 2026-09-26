@@ -3,8 +3,9 @@
 All credentials belong in server environment variables. No adapter accepts API
 keys from a browser or returns their values in integration status. Configuration
 status means credentials are present, not that a live request was verified.
-XRPL Testnet wallet funding and one real Test XRP settlement were verified;
-other providers' external writes were not exercised during implementation.
+XRPL Testnet wallet funding and a real Test XRP settlement were verified. The
+Nessie synthetic provisioning CLI and read-only app integration were also verified
+against the sandbox. No real messages or production-money transfers were made.
 
 ## NYC Open Data
 
@@ -55,26 +56,37 @@ repair verification is rejected.
 ## Capital One Nessie
 
 Nessie is a [mock banking API](https://api.nessieisreal.com/), not a connection to
-real bank accounts. `NESSIE_ENABLED=true`, `NESSIE_API_KEY`, and
-`NESSIE_ACCOUNT_ID` enable read-only account/purchases/bills imports. The official
+real bank accounts. `NESSIE_ENABLED=true`, `NESSIE_API_KEY`, `NESSIE_TENANT_ID`,
+`NESSIE_CUSTOMER_ID`, and `NESSIE_ACCOUNT_ID` enable a server-controlled binding
+and read-only customer/account/purchases/bills imports. The official
 [account SDK](https://github.com/nessieisreal/nessie-javascript-sdk/blob/master/lib/account.js),
 [purchase SDK](https://github.com/nessieisreal/nessie-javascript-sdk/blob/master/lib/purchase.js),
 and [bill SDK](https://github.com/nessieisreal/nessie-javascript-sdk/blob/master/lib/bills.js)
-define the endpoint shapes used here. The documentation site returned HTTP 403
-to this development environment, so credentialed interoperability remains
-unverified. No mock accounts or transactions were created.
+define the endpoint shapes used here. Credentialed HTTPS requests and synthetic
+record provisioning were verified against the current API. See
+[Nessie setup and demonstration](nessie.md) for configuration, seed receipts,
+provider compatibility notes, authorization, and tenant review behavior.
 
 The default origin is `https://api.nessieisreal.com`; `NESSIE_BASE_URL` can select
 `https://api.reimaginebanking.com` for the legacy provider. HTTP and arbitrary
 origins are rejected. Provider keys appear in query parameters because that is
 the documented API contract; request URLs are never included in errors.
 
-Nessie dollars are explicitly converted into integer USD cents. Only completed
-or executed purchases become imported expenses. `NESSIE_RENT_PAYEE` optionally
+Nessie dollars are explicitly converted into integer USD cents. Completed or
+executed purchases are suggestions for tenant review, never automatic expenses.
+Only explicit confirmation adds a deduplicated expense snapshot.
+`NESSIE_RENT_PAYEE` optionally
 identifies the exact rent bill payee; unrelated bills are never guessed to be
 rent. Cancelled/unknown bill statuses are omitted. Provider failures do not
 silently replace records with demo fixtures. With `NESSIE_ENABLED` unset, the
-adapter returns explicitly labeled sample financial context.
+adapter returns explicitly labeled sample financial context for cases that have
+not been bound to a live sandbox account. A saved live binding cannot downgrade
+to fixtures. Bank balance is separate from the app's simulated escrow ledger.
+
+Customer/account ownership and the trusted case binding are checked before
+authorization. Verification expires after 60 seconds; financial actions refresh
+it, and testnet tooling checks again immediately before signing. The visible
+account-substitution demonstration is a policy dry run with no settlement.
 
 ## Photon
 

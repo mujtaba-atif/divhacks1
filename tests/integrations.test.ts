@@ -86,18 +86,20 @@ test("NYC lookup maps actual records and preserves partial unavailability", asyn
 });
 
 test("Nessie uses explicit mock account and rent payee with integer cents", async (t) => {
-  const restore = environment({ NESSIE_ENABLED: "true", NESSIE_API_KEY: "test-key-not-real", NESSIE_ACCOUNT_ID: "test-account", NESSIE_RENT_PAYEE: "Landlord", NESSIE_BASE_URL: undefined });
+  const restore = environment({ NESSIE_ENABLED: "true", NESSIE_API_KEY: "test-key-not-real", NESSIE_TENANT_ID: "test", NESSIE_CUSTOMER_ID: "customer_123", NESSIE_ACCOUNT_ID: "account_456", NESSIE_RENT_PAYEE: "Landlord", NESSIE_BASE_URL: undefined });
   t.after(restore);
   t.mock.method(globalThis, "fetch", async (input: URL) => {
     const url = new URL(input);
-    if (url.pathname.endsWith("/purchases")) return Response.json([{ _id: "p1", amount: 47.99, purchase_date: "2026-09-01", description: "Heater", status: "completed" }, { _id: "p2", amount: 20, purchase_date: "2026-09-02", status: "cancelled" }]);
-    if (url.pathname.endsWith("/bills")) return Response.json([{ _id: "b1", payment_amount: 1850, payment_date: "2026-09-01", payee: "Landlord", status: "completed" }, { _id: "b2", payment_amount: 99, payee: "Phone company", status: "completed" }]);
-    return Response.json({ _id: "test-account", balance: 2450.19 });
+    if (url.pathname.includes("/customers/")) return Response.json({ _id: "customer_123" });
+    if (url.pathname.endsWith("/purchases")) return Response.json([{ _id: "p1", payer_id: "account_456", amount: 47.99, purchase_date: "2026-09-01", description: "Heater", status: "completed" }, { _id: "p2", payer_id: "account_456", amount: 20, purchase_date: "2026-09-02", status: "cancelled" }]);
+    if (url.pathname.endsWith("/bills")) return Response.json([{ _id: "b1", account_id: "account_456", payment_amount: 1850, payment_date: "2026-09-01", payee: "Landlord", status: "completed" }, { _id: "b2", account_id: "account_456", payment_amount: 99, payee: "Phone company", status: "completed" }]);
+    return Response.json({ _id: "account_456", customer_id: "customer_123", balance: 2450.19 });
   });
-  const context = await getFinancialContext();
-  assert.equal(context.accountBalanceCents, 245019);
-  assert.equal(context.expenses[0].amountCents, 4799);
-  assert.equal(context.expenses.length, 1);
+  const context = await getFinancialContext(createDemoCase("test"));
+  assert.equal(context.profile.accountBalanceCents, 245019);
+  assert.equal(context.profile.transactions[0].amountCents, 4799);
+  assert.equal(context.profile.transactions[0].relatedStatus, "suggested");
+  assert.equal(context.profile.transactions.length, 1);
   assert.equal(context.rentHistory.length, 1);
   assert.equal(context.rentHistory[0].amountCents, 185000);
   assert.equal(context.rentHistory[0].source, "nessie");
@@ -196,9 +198,19 @@ test("disabled testnet submissions are audited and never load or sign a case", a
 test("guarded testnet executor persists only validated success and rejects autofill tampering before signing", async (t) => {
   const wallet = Wallet.generate();
   const approval: TestnetEscrowApproval = { caseId: "RE-1042", escrowId: "ESC-RE-1042", ownerAddress: wallet.classicAddress, destination: Wallet.generate().classicAddress, amountUsdCents: 40000, amountDrops: "1000000", offerSequence: 123, finishAfter: 900000000, cancelAfter: 900086400 };
-  const restore = environment({ XRPL_TESTNET_ENABLED: "true", XRPL_TESTNET_SEED: wallet.seed, XRPL_TESTNET_PREIMAGE_HEX: "11".repeat(32), XRPL_TESTNET_APPROVAL_JSON: JSON.stringify(approval) });
+  const restore = environment({ XRPL_TESTNET_ENABLED: "true", XRPL_TESTNET_SEED: wallet.seed, XRPL_TESTNET_PREIMAGE_HEX: "11".repeat(32), XRPL_TESTNET_APPROVAL_JSON: JSON.stringify(approval),
+    NESSIE_ENABLED: "true", NESSIE_API_KEY: "test-only-key", NESSIE_TENANT_ID: "test", NESSIE_CUSTOMER_ID: "customer_123", NESSIE_ACCOUNT_ID: "account_456", NESSIE_BASE_URL: undefined });
   t.after(restore);
   const record = createDemoCase("test");
+  record.financialProfile!.binding.source = "nessie";
+  let bankingAvailable = true;
+  t.mock.method(globalThis, "fetch", async (input: URL) => {
+    if (!bankingAvailable) return new Response("Unavailable", { status: 503 });
+    const path = new URL(input).pathname;
+    if (path.includes("/customers/")) return Response.json({ _id: "customer_123" });
+    if (path.endsWith("/purchases") || path.endsWith("/bills")) return Response.json([]);
+    return Response.json({ _id: "account_456", customer_id: "customer_123", balance: 2430 });
+  });
   Object.assign(record.escrow, { network: "testnet", destination: approval.destination, ownerAddress: approval.ownerAddress });
   let tamper = false;
   let validated = true;
@@ -246,4 +258,73 @@ test("guarded testnet executor persists only validated success and rejects autof
   await assert.rejects(submitGuardedTestnetEscrow(intent, context), /No validated tesSUCCESS/);
   assert.equal(receipts.length, 1);
   assert.equal(failures.length, 3);
+  bankingAvailable = false;
+  const priorSigns = signs;
+  const priorSubmissions = submit.mock.callCount();
+  await assert.rejects(submitGuardedTestnetEscrow(intent, context), /Nessie API is unavailable/);
+  assert.equal(signs, priorSigns);
+  assert.equal(submit.mock.callCount(), priorSubmissions);
+  assert.equal(failures.length, 4);
+});
+
+test("a Nessie outage at the second pre-sign refresh produces no signature or submission", async (t) => {
+  const wallet = Wallet.generate();
+  const approval: TestnetEscrowApproval = {
+    caseId: "RE-1042", escrowId: "ESC-RE-1042", ownerAddress: wallet.classicAddress,
+    destination: Wallet.generate().classicAddress, amountUsdCents: 40000, amountDrops: "1000000",
+    offerSequence: 123, finishAfter: 900000000, cancelAfter: 900086400,
+  };
+  t.after(environment({
+    XRPL_TESTNET_ENABLED: "true", XRPL_TESTNET_SEED: wallet.seed,
+    XRPL_TESTNET_PREIMAGE_HEX: "11".repeat(32), XRPL_TESTNET_APPROVAL_JSON: JSON.stringify(approval),
+    NESSIE_ENABLED: "true", NESSIE_API_KEY: "offline-test-key", NESSIE_TENANT_ID: "test",
+    NESSIE_CUSTOMER_ID: "customer_123", NESSIE_ACCOUNT_ID: "account_456", NESSIE_BASE_URL: undefined,
+  }));
+  const record = createDemoCase("test");
+  record.financialProfile!.binding.source = "nessie";
+  Object.assign(record.escrow, { network: "testnet", destination: approval.destination, ownerAddress: approval.ownerAddress });
+
+  const requestedPaths: string[] = [];
+  t.mock.method(globalThis, "fetch", async (input: URL) => {
+    const path = new URL(input).pathname;
+    requestedPaths.push(path);
+    if (requestedPaths.length === 5) return new Response("Unavailable", { status: 503 });
+    if (path === "/customers/customer_123") return Response.json({ _id: "customer_123" });
+    if (path === "/accounts/account_456") return Response.json({ _id: "account_456", customer_id: "customer_123", balance: 2430 });
+    if (path === "/accounts/account_456/purchases" || path === "/accounts/account_456/bills") return Response.json([]);
+    throw new Error("Unexpected banking request");
+  });
+  t.mock.method(Client.prototype, "connect", async () => undefined);
+  t.mock.method(Client.prototype, "disconnect", async () => undefined);
+  t.mock.method(Client.prototype, "isConnected", () => true);
+  t.mock.method(Client.prototype, "getLedgerIndex", async () => 1000);
+  t.mock.method(Client.prototype, "request", async (request: Parameters<Client["request"]>[0]) => {
+    if (request.command === "server_info") return { result: { info: { network_id: 1, validated_ledger: { reserve_base_xrp: 1, reserve_inc_xrp: 0.2 } } } } as never;
+    if (request.command === "ledger") return { result: { ledger: { close_time: 899999999 } } } as never;
+    if (request.command === "account_info") return { result: { validated: true, account_data: { Account: wallet.classicAddress, Balance: "50000000", OwnerCount: 0, Sequence: 123 } } } as never;
+    throw new Error("Unexpected ledger request");
+  });
+  const autofill = t.mock.method(Client.prototype, "autofill", async (transaction: Parameters<Client["autofill"]>[0]) => ({ ...transaction, Fee: "12", LastLedgerSequence: 1020 }) as never);
+  const sign = t.mock.method(Wallet.prototype, "sign", () => { throw new Error("Must not sign after banking verification fails"); });
+  const submit = t.mock.method(Client.prototype, "submitAndWait", async () => { throw new Error("Must not submit after banking verification fails"); });
+  let loads = 0;
+  let receipts = 0;
+  const failures: { detail: string; submittedHash?: string }[] = [];
+  await assert.rejects(submitGuardedTestnetEscrow(makeIntent(record, "EscrowCreate"), {
+    loadCase: async () => { loads++; return structuredClone(record); },
+    recordResult: async () => { receipts++; },
+    recordFailure: async (failure) => { failures.push(failure); },
+  }), /Nessie API is unavailable/);
+
+  assert.deepEqual(requestedPaths, [
+    "/customers/customer_123", "/accounts/account_456", "/accounts/account_456/purchases",
+    "/accounts/account_456/bills", "/customers/customer_123",
+  ]);
+  assert.equal(loads, 2, "The second authoritative case reload must be reached");
+  assert.equal(autofill.mock.callCount(), 1, "The first banking preflight must allow transaction preparation");
+  assert.equal(sign.mock.callCount(), 0);
+  assert.equal(submit.mock.callCount(), 0);
+  assert.equal(receipts, 0);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].submittedHash, undefined);
 });

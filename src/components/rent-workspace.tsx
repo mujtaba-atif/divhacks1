@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ArrowDownToLine, Building2, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, CircleUserRound, FileImage, FileText, FlaskConical, LayoutDashboard, LoaderCircle, LockKeyhole, Menu, MessageSquare, Plus, PlugZap, RefreshCw, Search, ShieldCheck, Upload, Wallet, X } from "lucide-react";
 import type { BuildingRecord, CaseAction, CaseRecord, DashboardData, EvidenceRecord, EvidenceStage, PolicyResult } from "@/lib/types";
-import { ActivityTimeline, canRelease, EscrowPanel, EvidencePanel, evidenceSource, FinancesPanel, formatTestXrp, MessagesPanel, OverviewPanel, type WorkspaceTab } from "./case-panels";
+import { ActivityTimeline, canRelease, EscrowPanel, EvidencePanel, evidenceSource, formatTestXrp, MessagesPanel, OverviewPanel, type WorkspaceTab } from "./case-panels";
+import { FinancesPanel } from "./finances-panel";
 import { NewCaseDialog, type NewCaseInput } from "./new-case-dialog";
 import { Button, EmptyState, fullDate, Modal, money, StatusBadge } from "./workspace-ui";
 
@@ -41,7 +42,10 @@ function actionMessage(action: CaseAction, record: CaseRecord, policy?: PolicyRe
     case "reconcile_xrpl": return record.xrplSettlement?.status === "validated" ? "XRPL ledger validation confirmed." : "The latest XRPL ledger result is recorded.";
     case "xrpl_security_demo": return policy?.approved ? "Security dry run completed." : "Attack blocked before signing. Nothing was submitted.";
     case "add_expense": return "Expense added to your financial record.";
-    case "sync_finances": return "Sample financial records synced.";
+    case "sync_finances": return record.financialProfile?.status === "verified" ? `${record.financialProfile.binding.source === "demo" ? "Demo fixture" : "Nessie sandbox"} financial profile verified.` : "Financial verification is unavailable. Review the banking status before continuing.";
+    case "confirm_transaction": return "Transaction confirmed and included in the case financial impact.";
+    case "dismiss_transaction": return "Transaction dismissed from the case financial impact.";
+    case "check_financial_binding": return policy?.approved ? "Financial binding verified. No settlement action initiated." : "Payment authorization blocked. No settlement action initiated.";
     case "policy_check": return policy?.approved ? "Release policy checks passed." : "The transaction was blocked by the policy checks. No funds moved.";
   }
 }
@@ -57,6 +61,7 @@ export default function RentWorkspace() {
   const [modal, setModal] = useState<ModalName>(null);
   const [preview, setPreview] = useState<EvidenceRecord | null>(null);
   const [policy, setPolicy] = useState<PolicyResult | null>(null);
+  const [financialPolicy, setFinancialPolicy] = useState<PolicyResult | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const mutationBusy = useRef(false);
   const record = data?.cases.find((item) => item.id === activeId) || data?.cases[0];
@@ -81,12 +86,13 @@ export default function RentWorkspace() {
 
   async function runAction(action: CaseAction): Promise<CaseRecord | null> {
     if (!record || mutationBusy.current) return null;
-    mutationBusy.current = true; setPending(action.action); setError(null); setToast(null);
+    mutationBusy.current = true; setPending(action.action); setError(null); setToast(null); setFinancialPolicy(null);
     try {
       const result = await request<{ case: CaseRecord; policy?: PolicyResult }>(`/api/cases/${encodeURIComponent(record.id)}/actions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action) });
       updateRecord(result.case);
-      setPolicy(result.policy ?? null);
-      setToast({ message: actionMessage(action, result.case, result.policy), tone: result.policy?.approved === false || (action.action === "verify_repair" && !result.case.verification?.verified) ? "info" : "success" });
+      setPolicy(action.action === "check_financial_binding" ? null : result.policy ?? null);
+      if (action.action === "check_financial_binding") setFinancialPolicy(result.policy ?? null);
+      setToast({ message: actionMessage(action, result.case, result.policy), tone: result.policy?.approved === false || (action.action === "verify_repair" && !result.case.verification?.verified) || (action.action === "sync_finances" && result.case.financialProfile?.status !== "verified") ? "info" : "success" });
       return result.case;
     } catch (cause) {
       if (cause instanceof RequestError) {
@@ -105,7 +111,7 @@ export default function RentWorkspace() {
     try {
       const result = await request<{ case: CaseRecord }>("/api/cases", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
       setData((current) => current ? { ...current, cases: [...current.cases, result.case] } : current);
-      setActiveId(result.case.id); setTab("overview"); setPolicy(null); setToast({ message: "Your repair case is open.", tone: "success" });
+      setActiveId(result.case.id); setTab("overview"); setPolicy(null); setFinancialPolicy(null); setToast({ message: "Your repair case is open.", tone: "success" });
       return true;
     } catch (cause) { setError(cause instanceof Error ? cause.message : "The case could not be created."); return false; }
     finally { mutationBusy.current = false; setPending(null); }
@@ -116,7 +122,7 @@ export default function RentWorkspace() {
     mutationBusy.current = true; setPending("upload_evidence"); setError(null);
     try {
       const result = await request<{ case: CaseRecord }>(`/api/cases/${encodeURIComponent(record.id)}/evidence`, { method: "POST", body: form });
-      updateRecord(result.case); setPolicy(null); setModal(null); setTab("evidence"); setToast({ message: "Evidence uploaded. Any earlier repair confirmation has been cleared for a fresh review.", tone: "success" }); return true;
+      updateRecord(result.case); setPolicy(null); setFinancialPolicy(null); setModal(null); setTab("evidence"); setToast({ message: "Evidence uploaded. Any earlier repair confirmation has been cleared for a fresh review.", tone: "success" }); return true;
     } catch (cause) { setError(cause instanceof Error ? cause.message : "The evidence could not be uploaded."); return false; }
     finally { mutationBusy.current = false; setPending(null); }
   }
@@ -126,7 +132,7 @@ export default function RentWorkspace() {
     mutationBusy.current = true; setPending("reset"); setError(null);
     try {
       const result = await request<DashboardData>("/api/demo/reset", { method: "POST" });
-      setData(result); setActiveId(result.cases[0]?.id || ""); setTab("overview"); setModal(null); setPolicy(null); setToast({ message: "The demo workspace has been reset to its sample case.", tone: "success" });
+      setData(result); setActiveId(result.cases[0]?.id || ""); setTab("overview"); setModal(null); setPolicy(null); setFinancialPolicy(null); setToast({ message: "The demo workspace has been reset to its sample case.", tone: "success" });
     } catch (cause) { setError(cause instanceof Error ? cause.message : "The demo could not be reset."); }
     finally { mutationBusy.current = false; setPending(null); }
   }
@@ -153,7 +159,7 @@ export default function RentWorkspace() {
     <div className="workspace-body"><header className="topbar"><div className="topbar-left"><button className="icon-button mobile-menu" aria-label="Open workspace navigation" aria-expanded={mobileNav} onClick={() => setMobileNav(true)}><Menu size={21} /></button><a className="mobile-brand" href="/">RentEscrow <span>NYC</span></a><span>Workspace</span><ChevronRight size={14} /><span>My cases</span>{record && <><ChevronRight size={14} /><strong>{record.id}</strong></>}</div><div className="topbar-right"><span className="demo-pill"><span />Demo mode</span><button className="icon-button" title="View connections" aria-label="View integration connections" onClick={() => openModal("integrations")} disabled={!data}><PlugZap size={18} /></button><span className="topbar-avatar">T</span></div></header>
       <main id="main-content" className="main-content">
         {loading ? <div className="workspace-loading" role="status"><LoaderCircle className="spin" size={27} /><h1>Opening your workspace</h1><p>Loading your repair cases and records.</p></div> : !data ? <div className="workspace-loading"><EmptyState icon={CircleHelp} title="Your workspace could not load" action={<Button icon={RefreshCw} onClick={() => { setLoading(true); void loadDashboard(); }}>Try again</Button>}>{error || "Please try again in a moment."}</EmptyState></div> : !record ? <EmptyState icon={FileText} title="No repair cases yet" action={<Button variant="primary" icon={Plus} onClick={() => openModal("new-case")}>Open a case</Button>}>Your cases will appear here.</EmptyState> : <>
-          <div className="case-meta-line"><div><span className="eyebrow">REPAIR CASE</span><span className="case-id">{record.id}</span><StatusBadge status={record.status} /></div><label className="case-switcher"><span className="sr-only">Select case</span><select aria-label="Select case" value={record.id} onChange={(event) => { setActiveId(event.target.value); setPolicy(null); setTab("overview"); setError(null); }} disabled={!!pending}>{data.cases.map((item) => <option value={item.id} key={item.id}>{item.id} · {item.title}</option>)}</select><ChevronDown size={14} /></label></div>
+          <div className="case-meta-line"><div><span className="eyebrow">REPAIR CASE</span><span className="case-id">{record.id}</span><StatusBadge status={record.status} /></div><label className="case-switcher"><span className="sr-only">Select case</span><select aria-label="Select case" value={record.id} onChange={(event) => { setActiveId(event.target.value); setPolicy(null); setFinancialPolicy(null); setTab("overview"); setError(null); }} disabled={!!pending}>{data.cases.map((item) => <option value={item.id} key={item.id}>{item.id} · {item.title}</option>)}</select><ChevronDown size={14} /></label></div>
           <div className="case-header"><div><h1>{record.title}</h1><div className="case-location"><span><Building2 size={15} />{record.building.address}, Apt {record.apartment}</span><span className="location-divider" /><span>Opened {fullDate(record.createdAt)}</span></div></div><div className="case-header-actions"><a className="button button-secondary icon-only-mobile" href={`/api/cases/${encodeURIComponent(record.id)}/export`} download aria-label="Export case dossier" title="Export case dossier"><ArrowDownToLine size={16} /><span>Export case</span></a><Button variant="primary" icon={Plus} onClick={() => openModal("upload")} disabled={!!pending || record.status === "resolved"}>Add evidence</Button></div></div>
           <div className="case-tabs" role="tablist" aria-label="Case sections">{tabs.map(({ id, label, icon: Icon }) => <button role="tab" id={`tab-${id}`} aria-selected={tab === id} aria-controls={`panel-${id}`} tabIndex={tab === id ? 0 : -1} key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)} onKeyDown={(event) => { const index = tabs.findIndex((item) => item.id === id); let next: number | null = null; if (event.key === "ArrowRight") next = (index + 1) % tabs.length; if (event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length; if (event.key === "Home") next = 0; if (event.key === "End") next = tabs.length - 1; if (next !== null) { event.preventDefault(); setTab(tabs[next].id); document.getElementById(`tab-${tabs[next].id}`)?.focus(); } }}><Icon size={16} />{label}{id === "evidence" && <span>{record.evidence.length}</span>}</button>)}</div>
           {error && !modal && <div className="error-banner" role="alert"><CircleHelp size={18} /><span>{error}</span><button className="icon-button" onClick={() => setError(null)} title="Dismiss error" aria-label="Dismiss error"><X size={16} /></button></div>}
@@ -162,7 +168,7 @@ export default function RentWorkspace() {
             {tab === "overview" && <OverviewPanel record={record} pending={pending} onAction={runAction} onTab={setTab} onUpload={() => openModal("upload")} onPreview={setPreview} onActivity={() => openModal("activity")} onBuilding={() => openModal("building")} />}
             {tab === "evidence" && <EvidencePanel record={record} pending={pending} onAction={runAction} onUpload={() => openModal("upload")} onPreview={setPreview} />}
             {tab === "messages" && <MessagesPanel record={record} pending={pending} onAction={runAction} liveDelivery={data.integrations.some((item) => item.id === "photon" && item.status === "configured")} />}
-            {tab === "finances" && <FinancesPanel record={record} pending={pending} onAction={runAction} onExpense={() => openModal("expense")} />}
+            {tab === "finances" && <FinancesPanel record={record} pending={pending} onAction={runAction} onExpense={() => openModal("expense")} policy={financialPolicy} nessieConfigured={data.integrations.some((item) => item.id === "nessie" && item.status === "configured")} />}
             {tab === "escrow" && <EscrowPanel record={record} pending={pending} onAction={runAction} onRelease={() => openModal("release")} onXrplReview={() => openModal("xrpl-settle")} policy={policy} xrplConfigured={data.integrations.some((item) => item.id === "xrpl" && item.status === "configured")} />}
           </div>
           <footer className="workspace-footer"><span><ShieldCheck size={13} />Your case. Your evidence. Your approval.</span><span>{record.building.source === "demo" ? "Sample NYC case" : "NYC repair case"} · Simulated USD{record.xrplSettlement ? " · XRPL Testnet" : ""}</span></footer>

@@ -7,7 +7,7 @@ case-bound XRPL Testnet Payment provides real on-chain settlement using Test XRP
 
 ## Run locally
 
-Requires Node.js 20.9+ and pnpm. No API keys are required for the demo.
+Requires Node.js 22+ and pnpm. No API keys are required for the demo.
 
 ```sh
 pnpm install
@@ -47,9 +47,9 @@ limitations.
 | --- | --- |
 | NYC Open Data | Public building complaint and violation lookup; explicit warnings on unavailable data |
 | Gemini | Server-side structured evidence analysis and before/after comparison when configured |
-| Nessie | Opt-in mock account, rent, and transaction context |
+| Nessie | Verified sandbox customer/account binding, rent history, tenant-reviewed costs, and account-substitution guardrail |
 | Photon | Opt-in approved-recipient outbound iMessage; demo replies by default |
-| MongoDB Atlas | Optional session storage; local atomic JSON persistence by default |
+| MongoDB Atlas | Session records and GridFS uploads when configured; local atomic JSON persistence by default |
 | XRPL | Guarded real Testnet Payment settlement; application escrow remains simulated USD |
 
 ## XRP Testnet demo
@@ -75,6 +75,18 @@ actions without signing or submitting anything.
 See [XRP implementation and judge walkthrough](docs/xrpl-demo.md) for the live
 transaction proof, public wallet addresses, configuration, recovery, and limits.
 
+For Atlas, follow [database setup](docs/mongodb-atlas.md), then run
+`pnpm db:check` to verify indexes and a temporary write/read/delete probe.
+An Atlas Administration API key is not needed. Switching storage does not
+automatically import existing local cases.
+
+For Nessie, follow [financial verification setup](docs/nessie.md), then run
+`pnpm nessie:check`. The Finances view separates the verified sandbox bank balance
+from simulated escrow funds and requires confirmation before imported purchases
+count toward issue impact. Its account-substitution check demonstrates a blocked
+authorization without sending a payment. Existing expense snapshots are retained
+when switching providers; they are not silently rewritten or reclassified.
+
 ## Verification
 
 ```sh
@@ -84,18 +96,22 @@ pnpm build
 pnpm test:e2e
 ```
 
-The end-to-end tests use local Chrome and start a local server if needed. An
-already-running server is reused. Set `E2E_BASE_URL` to test another local port.
-Tests create isolated demo sessions; they do not send real messages or submit
-ledger transactions. Run them with external providers disabled. For a new test
-server after wallet setup, use `XRPL_SETTLEMENT_ENABLED=false pnpm test:e2e`.
-Do not reuse a server with unrelated live provider credentials during tests.
+The end-to-end tests use local Chrome and a dedicated server on port 3100. They
+refuse to reuse an existing server and explicitly disable live storage and
+providers, so `.env.local` cannot enable Atlas, Nessie, Gemini, Photon, or XRPL
+in the test server. Stop `pnpm dev` first because both processes use Next's build
+directory; keep its normal port 3000 separate from the test port. `E2E_BASE_URL`
+can select another unused local port. Tests create isolated demo sessions and
+never send real messages or submit ledger transactions.
 
 Tests cover policy tampering, insufficient funds, release prerequisites,
 concurrent duplicate funding, persistent state, tenant isolation, upload
-validation, and the full repair-to-settlement flow. XRP tests additionally cover
-transaction tampering, reserve/fee checks, delivered amount validation, durable
-pending receipts, recovery, and prevention of duplicate payments.
+validation, Nessie ownership and stale verification, confirmed-cost deduplication,
+provider corrections, account substitution, and the full repair-to-settlement
+flow. Nessie browser tests intercept the API and exercise failure states without
+mutating provider data.
+XRP tests additionally cover transaction tampering, reserve/fee checks, delivered
+amount validation, durable pending receipts, recovery, and duplicate prevention.
 
 ## Structure
 
@@ -111,13 +127,14 @@ pending receipts, recovery, and prevention of duplicate payments.
 Local records and uploads are stored under ignored `.data/`. The demo uses
 opaque browser-session cookies, not production user accounts. Do not publicly
 deploy this prototype with personal tenant records or live messaging enabled
-before adding production authentication, retention controls, external upload
-storage, and delivery/reconciliation handling.
+before adding production authentication, retention and backup controls, and
+delivery/reconciliation handling.
 
 ## Scope
 
-Implemented from the 16-page planning PDF supplied on September 26, 2026,
-with the 27-page XRP follow-up implemented using its permitted Payment fallback.
+Implemented from the original 16-page planning PDF, the eight-page Nessie
+integration addendum, and the 27-page XRP follow-up supplied on September 26,
+2026. The XRP flow uses its permitted Payment fallback.
 [Implementation contract](docs/implementation-contract.md) records the shared
 API and state invariants. [Asset provenance](docs/asset-provenance.md) records the
 generated demonstration images. This prototype organizes evidence and demonstrates

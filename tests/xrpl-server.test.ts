@@ -114,6 +114,34 @@ test("validated Testnet settlement releases simulated USD once under duplicate c
   assert.equal(record.escrow.audit.at(-1)?.code, "SETTLEMENT_ALREADY_COMPLETED");
 });
 
+test("settlement refreshes stale trusted financial verification before policy and signing", async (t) => {
+  const setup = await preparedCase(t);
+  await mutateSession(setup.ownerId, (document) => {
+    document.cases[0].financialProfile!.expiresAt = "2000-01-01T00:00:00.000Z";
+  });
+  const ledger = mockLedger(t, setup.source);
+  const result = await performCaseAction(setup.ownerId, setup.caseId, { action: "settle_xrpl" });
+  assert.equal(result.case.xrplSettlement?.status, "validated");
+  assert.ok(Date.parse(result.case.financialProfile!.expiresAt!) > Date.now());
+  assert.equal(ledger.submit.mock.callCount(), 1);
+});
+
+test("failed trusted financial refresh blocks settlement before ledger access", async (t) => {
+  const setup = await preparedCase(t);
+  environment(t, {
+    NESSIE_ENABLED: "true", NESSIE_API_KEY: undefined, NESSIE_TENANT_ID: undefined,
+    NESSIE_CUSTOMER_ID: undefined, NESSIE_ACCOUNT_ID: undefined,
+  });
+  const connect = t.mock.method(Client.prototype, "connect", async () => undefined);
+  await assert.rejects(performCaseAction(setup.ownerId, setup.caseId, { action: "settle_xrpl" }),
+    /Nessie requires an API key/);
+  assert.equal(connect.mock.callCount(), 0);
+  const stored = await readSession(setup.ownerId);
+  assert.equal(stored?.cases[0].financialProfile?.status, "unavailable");
+  assert.equal(stored?.cases[0].xrplSettlement?.status, "ready");
+  assert.equal(stored?.cases[0].escrow.audit.at(-1)?.status, "rejected");
+});
+
 test("uncertain submission stays pending, blocks mutation and replay, then reconciles read-only", async (t) => {
   const setup = await preparedCase(t);
   const ledger = mockLedger(t, setup.source);
