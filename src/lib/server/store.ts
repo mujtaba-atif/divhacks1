@@ -5,6 +5,8 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createDemoCase } from "@/lib/seed";
 import type { CaseRecord } from "@/lib/types";
+import type { RegisteredUser } from "./auth";
+import type { DigitalContract } from "./contracts";
 import { ApiError } from "./errors";
 import { assertSessionSize, readMongoSession, saveMongoSession } from "./mongodb-store";
 
@@ -17,6 +19,9 @@ export interface SessionDocument {
   simulatedDebitsCents: number;
   cases: CaseRecord[];
   uncertainDeliveries?: { caseId: string; messageHash: string; createdAt: string }[];
+  /** Optional so existing anonymous demo sessions retain their original shape. */
+  users?: RegisteredUser[];
+  contracts?: DigitalContract[];
 }
 
 const sharedRuntime = globalThis as typeof globalThis & { rentEscrowSessionLocks?: Map<string, Promise<void>> };

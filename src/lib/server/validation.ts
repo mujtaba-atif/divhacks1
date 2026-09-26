@@ -28,7 +28,9 @@ const transactionIntentSchema = z.object({
   caseId: text(120),
   escrowId: text(120),
   transactionType: text(80),
-  destination: text(240),
+  // A self-documentation case intentionally has no destination wallet; policy
+  // must receive that empty intent so it can reject and audit the attempt.
+  destination: z.string().trim().max(240),
   amountCents: z.number().int().min(0).max(100_000_000),
   network: text(80),
   tenantId: text(120).optional(),

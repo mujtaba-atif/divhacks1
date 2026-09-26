@@ -49,6 +49,21 @@ export function evaluatePolicy(record: CaseRecord, intent: TransactionIntent): P
   const finishing = intent.transactionType === "EscrowFinish";
   const checks: PolicyCheck[] = [];
   const check = (key: string, label: string, passed: boolean, detail: string) => checks.push({ key, label, passed, detail });
+  // Additive safeguard for contract-gated tenant-only documentation cases. Legacy
+  // cases have no case_type and therefore retain the bilateral policy unchanged.
+  if (record.case_type === "self_documentation") {
+    check("case", "Case matches", intent.caseId === record.id, `Only ${record.id} can authorize this action.`);
+    check("type", "Transaction type allowed", false, "Self-documentation cases do not support escrow funding or fund release.");
+    check("escrow", "Escrow matches", Boolean(record.escrow.id) && intent.escrowId === record.escrow.id, "The escrow must belong to this case.");
+    check("destination", "No landlord destination", intent.destination === "" && record.escrow.destination === "", "Self-documentation cases never approve a landlord or tenant wallet destination.");
+    check("amount", "Approved amount", Number.isSafeInteger(intent.amountCents) && intent.amountCents > 0
+      && intent.amountCents === record.disputedAmountCents && intent.amountCents === record.escrow.amountCents,
+    "The exact documented amount is required; amounts cannot be changed by an agent.");
+    check("network", "Expected network", intent.network === "demo" && record.escrow.network === "demo", "Self-documentation cases are limited to simulated demo deposits.");
+    check("state", "No escrow transfer state", record.escrow.status === "unfunded", "Self-documentation cases never authorize escrow transfers.");
+    check("status", "Case is active", record.status !== "resolved", "A resolved case cannot authorize a new deposit.");
+    return { approved: checks.every((item) => item.passed), checks };
+  }
   check("case", "Case matches", intent.caseId === record.id, `Only ${record.id} can authorize this action.`);
   check("type", "Transaction type allowed", ["EscrowCreate", "EscrowFinish"].includes(intent.transactionType), "Only escrow creation and release are supported.");
   check("escrow", "Escrow matches", Boolean(record.escrow.id) && intent.escrowId === record.escrow.id, "The escrow must belong to this case.");

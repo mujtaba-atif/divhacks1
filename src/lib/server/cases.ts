@@ -152,6 +152,33 @@ export async function createCase(ownerId: string, input: z.infer<typeof newCaseS
   });
 }
 
+/** Creates a case only after contracts.ts has checked the current session's acceptance record. */
+export async function createContractCase(
+  ownerId: string,
+  input: z.infer<typeof newCaseSchema>,
+  contractId: string,
+) {
+  const building = await lookupBuilding(input.address, input.borough);
+  return mutateSession(ownerId, (document) => {
+    if (document.cases.length >= 20) throw new ApiError(409, "This demo allows up to 20 cases per session.");
+    const contract = document.contracts?.find((item) => item.id === contractId);
+    if (!contract || contract.status !== "active" || contract.caseId) {
+      throw new ApiError(409, "A fully accepted unused contract is required before creating a case.");
+    }
+    const caseRecord = createNewCase(ownerId, { ...input, building });
+    caseRecord.case_type = contract.case_type;
+    if (contract.case_type === "self_documentation") {
+      // No destination wallet is recorded or approved for a tenant-only case.
+      caseRecord.escrow.destination = "";
+    }
+    caseRecord.accountBalanceCents = document.accountBalanceCents;
+    document.cases.push(caseRecord);
+    contract.status = "used";
+    contract.caseId = caseRecord.id;
+    return caseRecord;
+  });
+}
+
 export async function addUploadedEvidence(ownerId: string, caseId: string, evidence: EvidenceRecord) {
   return mutateSession(ownerId, (document) => {
     const caseRecord = findCase(document, caseId);

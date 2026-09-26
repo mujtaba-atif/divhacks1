@@ -1,4 +1,5 @@
 export type IssueType = "heating" | "mold" | "leak" | "pests" | "elevator" | "other";
+export type CaseType = "bilateral" | "self_documentation";
 export type CaseStatus = "open" | "awaiting_repair" | "verification" | "verified" | "resolved";
 export type EvidenceStage = "before" | "after" | "receipt" | "other";
 
@@ -185,6 +186,8 @@ export interface CaseRecord {
   escrow: EscrowRecord;
   repairReported: boolean;
   tenantConfirmed: boolean;
+  /** Omitted for pre-registration demo cases; bilateral is the legacy behavior. */
+  case_type?: CaseType;
   verification?: EvidenceAnalysis;
 }
 
