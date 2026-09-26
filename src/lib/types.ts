@@ -90,7 +90,7 @@ export interface PolicyResult {
 
 export interface AuditRecord {
   id: string;
-  action: "EscrowCreate" | "EscrowFinish" | "PolicyCheck";
+  action: "EscrowCreate" | "EscrowFinish" | "PolicyCheck" | "Payment";
   createdAt: string;
   status: "validated" | "rejected" | "failed";
   network: "demo" | "testnet";
@@ -98,7 +98,72 @@ export interface AuditRecord {
   destination: string;
   hash?: string;
   detail: string;
+  caseId?: string;
+  attemptedCaseId?: string;
+  settlementId?: string;
+  requestedAction?: string;
+  requestedTransactionType?: string;
+  requestedNetwork?: string;
+  source?: string;
+  amountDrops?: string;
+  approvedAmountDrops?: string;
+  ledgerIndex?: number;
+  result?: string;
+  validated?: boolean;
+  code?: string;
+  signed?: boolean;
+  submitted?: boolean;
 }
+
+/** Public authorization and receipt only. Never store signing keys here. */
+export interface XrplSettlement {
+  id: string;
+  caseId: string;
+  ownerId: string;
+  escrowId: string;
+  network: "testnet";
+  transactionType: "Payment";
+  source: string;
+  destination: string;
+  amountDrops: string;
+  amountUsdCents: number;
+  status: "ready" | "pending" | "validated" | "failed";
+  createdAt: string;
+  hash?: string;
+  sequence?: number;
+  lastLedgerSequence?: number;
+  ledgerIndex?: number;
+  result?: string;
+  validatedAt?: string;
+  errorCode?: string;
+  detail?: string;
+}
+
+export interface XrplSettlementIntent {
+  caseId: string;
+  ownerId: string;
+  escrowId: string;
+  settlementId: string;
+  requestedAction: string;
+  transactionType: string;
+  network: string;
+  source: string;
+  destination: string;
+  amountDrops: string;
+  amountUsdCents: number;
+}
+
+/** Optional trusted normalized context; no dependency on a banking provider. */
+export interface FinancialPolicyContext {
+  tenantVerified?: boolean;
+  customerVerified?: boolean;
+  accountVerified?: boolean;
+  accountCustomerBound?: boolean;
+  financiallyReady?: boolean;
+}
+
+export type XrplSecurityScenario = "wallet_switch" | "amount_tamper" | "prompt_injection"
+  | "insufficient_funds" | "duplicate" | "wrong_network" | "wrong_case" | "unsupported_action";
 
 export interface EscrowRecord {
   id: string;
@@ -141,6 +206,8 @@ export interface CaseRecord {
   repairReported: boolean;
   tenantConfirmed: boolean;
   verification?: EvidenceAnalysis;
+  xrplSettlement?: XrplSettlement;
+  financialPolicyContext?: FinancialPolicyContext;
 }
 
 export interface IntegrationStatus {
@@ -174,6 +241,10 @@ export type CaseAction =
   | { action: "verify_repair" }
   | { action: "confirm_resolution" }
   | { action: "release_escrow" }
+  | { action: "enable_xrpl" }
+  | { action: "settle_xrpl" }
+  | { action: "reconcile_xrpl" }
+  | { action: "xrpl_security_demo"; scenario: XrplSecurityScenario }
   | { action: "add_expense"; label: string; amountCents: number; category: string }
   | { action: "sync_finances" }
   | { action: "policy_check"; intent: TransactionIntent };

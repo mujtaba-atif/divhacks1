@@ -5,6 +5,12 @@ Build the full no-heat demonstration in Next.js App Router, TypeScript, and
 Node.js. All monetary values use integer USD cents. Demo escrow is simulated
 USD; real XRPL adapters use explicit testnet XRP units, never an implicit FX rate.
 
+The subsequent 27-page XRP requirements extend this contract: the existing USD
+escrow remains simulated, while an opt-in case-bound Testnet `Payment` provides
+real settlement after repair verification and tenant confirmation. This uses the
+document's explicit fallback instead of adding native escrow expiry and preimage
+custody to the case workflow. See [the XRP walkthrough](xrpl-demo.md).
+
 ## Ownership
 
 - Root: scaffolding, types, seed data, deterministic policy, tests, documentation.
@@ -56,9 +62,10 @@ only. Arbitrary real uploads cannot be falsely verified by the demo analyzer.
 Gemini is opt-in with credentials; image evidence is untrusted input. Photon
 external delivery additionally requires an explicit live opt-in and tenant send
 action. If API details cannot be verified, fail closed and document the missing
-contract. Do not send real messages or submit real ledger transactions during
-development. Provide independently callable guarded XRPL testnet tooling, but
-keep the application escrow demo-only until real auth and wallet custody exist.
+contract. Do not send real messages during development. The approved XRP follow-up
+permits dedicated faucet-funded Testnet wallet setup and real Testnet Payment
+verification. The native escrow tooling remains independently callable. Application
+USD escrow is always simulated; production funds and Mainnet are unsupported.
 
 ## Escrow invariants
 

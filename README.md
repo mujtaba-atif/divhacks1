@@ -2,7 +2,8 @@
 
 A tenant case workspace for the DivHacks 2026 no-heat demonstration. Building
 records, evidence, landlord messages, expenses, repair verification, and a
-guarded simulated escrow stay together in one persistent case.
+guarded simulated USD escrow stay together in one persistent case. An optional,
+case-bound XRPL Testnet Payment provides real on-chain settlement using Test XRP.
 
 ## Run locally
 
@@ -49,7 +50,30 @@ limitations.
 | Nessie | Opt-in mock account, rent, and transaction context |
 | Photon | Opt-in approved-recipient outbound iMessage; demo replies by default |
 | MongoDB Atlas | Optional session storage; local atomic JSON persistence by default |
-| XRPL | Isolated, guarded testnet tooling; application escrow is always simulated USD |
+| XRPL | Guarded real Testnet Payment settlement; application escrow remains simulated USD |
+
+## XRP Testnet demo
+
+```sh
+pnpm xrpl:setup-testnet
+pnpm dev
+```
+
+The one-time setup creates and faucet-funds dedicated tenant and landlord
+Testnet wallets, saves only the tenant signing seed to ignored `.env.local`,
+and preserves existing wallets when rerun. Use `npm run xrpl:setup-testnet` if
+pnpm is unavailable and dependencies are already installed.
+
+In Escrow, set aside the simulated $400 and select **Enable Testnet settlement**.
+Complete the repair verification and tenant confirmation, then review and approve
+the separate **10 Test XRP** payment. This amount is configurable and has no USD
+exchange-rate relationship. Only a validated `tesSUCCESS` receipt closes the case.
+The compromised-agent controls demonstrate wallet switching, amount tampering,
+prompt injection, insufficient funds, replay, wrong network/case, and unsupported
+actions without signing or submitting anything.
+
+See [XRP implementation and judge walkthrough](docs/xrpl-demo.md) for the live
+transaction proof, public wallet addresses, configuration, recovery, and limits.
 
 ## Verification
 
@@ -63,11 +87,15 @@ pnpm test:e2e
 The end-to-end tests use local Chrome and start a local server if needed. An
 already-running server is reused. Set `E2E_BASE_URL` to test another local port.
 Tests create isolated demo sessions; they do not send real messages or submit
-ledger transactions. Run them without live provider credentials.
+ledger transactions. Run them with external providers disabled. For a new test
+server after wallet setup, use `XRPL_SETTLEMENT_ENABLED=false pnpm test:e2e`.
+Do not reuse a server with unrelated live provider credentials during tests.
 
 Tests cover policy tampering, insufficient funds, release prerequisites,
 concurrent duplicate funding, persistent state, tenant isolation, upload
-validation, and the full repair-to-settlement flow.
+validation, and the full repair-to-settlement flow. XRP tests additionally cover
+transaction tampering, reserve/fee checks, delivered amount validation, durable
+pending receipts, recovery, and prevention of duplicate payments.
 
 ## Structure
 
@@ -75,6 +103,7 @@ validation, and the full repair-to-settlement flow.
 - `src/app/api`: session-scoped HTTP routes.
 - `src/lib/server`: persistence, validation, and case state transitions.
 - `src/lib/integrations`: provider adapters and isolated XRPL testnet tooling.
+- `scripts/xrpl-setup-testnet.ts`: one-time Testnet wallet setup.
 - `src/lib/policy.ts`: deterministic escrow authorization.
 - `tests`: policy, integration, API, and browser verification.
 - `.codex/agents`: the installed VoltAgent specialist profiles.
@@ -87,7 +116,8 @@ storage, and delivery/reconciliation handling.
 
 ## Scope
 
-Implemented from the 16-page planning PDF supplied on September 26, 2026.
+Implemented from the 16-page planning PDF supplied on September 26, 2026,
+with the 27-page XRP follow-up implemented using its permitted Payment fallback.
 [Implementation contract](docs/implementation-contract.md) records the shared
 API and state invariants. [Asset provenance](docs/asset-provenance.md) records the
 generated demonstration images. This prototype organizes evidence and demonstrates

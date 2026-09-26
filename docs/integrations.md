@@ -3,7 +3,8 @@
 All credentials belong in server environment variables. No adapter accepts API
 keys from a browser or returns their values in integration status. Configuration
 status means credentials are present, not that a live request was verified.
-External writes were not exercised during implementation.
+XRPL Testnet wallet funding and one real Test XRP settlement were verified;
+other providers' external writes were not exercised during implementation.
 
 ## NYC Open Data
 
@@ -105,7 +106,29 @@ webhook is treated as proof that a landlord completed a repair.
 
 ## XRP Ledger Testnet
 
-The app's escrow remains simulated USD. The separate `xrpl-testnet.ts` module is
+### Application settlement
+
+The application now supports an opt-in real Testnet **Payment** beneath its
+simulated USD escrow. [The XRP walkthrough](xrpl-demo.md) contains the verified
+receipt, environment settings, security demonstrations, and recovery steps.
+`xrpl-settlement.ts` reuses the existing final transaction validator and domain
+repair policy. Native XRP is approved independently in drops; no implicit USD
+conversion occurs. The server constructs an exact direct
+[Payment](https://xrpl.org/docs/references/protocol/transactions/types/payment),
+rejects partial-payment/extra fields, persists the signed hash before submission,
+and accepts only a matching validated `tesSUCCESS` plus exact delivered amount.
+
+`pnpm xrpl:setup-testnet` uses the existing `xrpl.js`
+[`Client.fundWallet`](https://js.xrpl.org/classes/Client.html#fundWallet) API.
+It writes a dedicated tenant seed directly to ignored `.env.local` and stores
+only the landlord's public address. Mainnet and custom RPC endpoints are rejected.
+Live execution is limited to local storage on one host; MongoDB signing is
+blocked until distributed wallet locking is implemented. MongoDB continues to
+support the simulated case workflow.
+
+### Separate native escrow tooling
+
+The separate `xrpl-testnet.ts` module is
 operator tooling with no HTTP route, no user-supplied signer, no mainnet option,
 and no exchange-rate conversion. `xrpl.js` handles validation, serialization,
 autofill, signing, and submission. This tooling has offline validation tests;
@@ -169,7 +192,8 @@ submission or persistence failure records the submitted hash for reconciliation.
 Never retry an uncertain create with a new sequence. A confirmed ledger receipt
 must be reconciled before changing approval or application state.
 
-Before exposing testnet actions in the app, implement authenticated tenancy,
-wallet custody and secret lifecycle, durable idempotency and reconciliation,
-cross-process case locking, and tenant-approved native XRP amounts. Real rent
-funds and production legal workflows are outside this demonstration.
+The native escrow module remains operator-only. The app's separate Payment path
+adds case-bound authorization, durable idempotency/reconciliation and cross-process
+locks for the local hackathon demo. Production authentication, external custody,
+and distributed locking remain outside scope. Real rent funds and production
+legal workflows are outside this demonstration.

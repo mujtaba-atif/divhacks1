@@ -9,7 +9,16 @@ import {
   sendLandlordMessage,
   verifyEvidence,
 } from "@/lib/integrations";
-import { evaluatePolicy, makeIntent } from "@/lib/policy";
+import {
+  createXrplSettlement,
+  executeXrplSettlement,
+  reconcileXrplSettlement,
+  runXrplSecurityDemo,
+  XrplError,
+  type XrplPending,
+  type XrplReceipt,
+} from "@/lib/integrations/xrpl-settlement";
+import { evaluatePolicy, evaluateXrplPolicy, makeIntent, makeXrplIntent } from "@/lib/policy";
 import { createNewCase } from "@/lib/seed";
 import type {
   AuditRecord,
@@ -19,11 +28,20 @@ import type {
   PolicyResult,
   TimelineEvent,
   TransactionIntent,
+  XrplSettlementIntent,
 } from "@/lib/types";
 import type { z } from "zod";
 import { ApiError } from "./errors";
-import { findCase, mutateSession, updateSharedBalance, type SessionDocument } from "./store";
+import {
+  findCase,
+  mutateSession,
+  updateSharedBalance,
+  withXrplWalletLock,
+  type SessionDocument,
+  type SessionMutationContext,
+} from "./store";
 import type { newCaseSchema } from "./validation";
+import { readXrplJournal, recordXrplPending, recordXrplValidated } from "./xrpl-journal";
 
 export type CaseActionResult = { case: CaseRecord; policy?: PolicyResult };
 const UNCERTAIN_DELIVERY_RETRY_DELAY_MS = 5 * 60 * 1000;
@@ -55,6 +73,26 @@ function assertMutable(caseRecord: CaseRecord) {
   }
 }
 
+async function assertNoPendingSettlement(caseRecord: CaseRecord) {
+  const journal = caseRecord.xrplSettlement ? await readXrplJournal(caseRecord.xrplSettlement) : null;
+  if (caseRecord.xrplSettlement?.status === "pending") {
+    throw new ApiError(409, "Reconcile the pending XRPL transaction before changing this case.",
+      false, "SETTLEMENT_PENDING");
+  }
+  if (journal?.status === "pending") {
+    throw new ApiError(409, "A durable XRPL transaction record must be reconciled before changing this case.",
+      false, "SETTLEMENT_PENDING");
+  }
+  if (journal?.status === "validated" && caseRecord.xrplSettlement?.status !== "validated") {
+    throw new ApiError(409, "Apply the durable validated XRPL receipt before changing this case.",
+      false, "XRPL_RECEIPT_RECONCILIATION_REQUIRED");
+  }
+}
+
+async function assertSessionNoPendingSettlement(document: SessionDocument) {
+  for (const caseRecord of document.cases) await assertNoPendingSettlement(caseRecord);
+}
+
 function assertCapacity(caseRecord: CaseRecord) {
   if (caseRecord.evidence.length >= 30) throw new ApiError(409, "This demo allows up to 30 evidence files per case.");
   const storedBytes = caseRecord.evidence.reduce((total, item) => total + (item.dataUrl?.length || 0), 0);
@@ -74,6 +112,107 @@ function appendAudit(
     amountCents: intent.amountCents, destination: intent.destination, detail, ...(hash ? { hash } : {}),
   });
   caseRecord.updatedAt = now();
+}
+
+function failedPolicyCode(policy: PolicyResult) {
+  return policy.checks.find((check) => !check.passed)?.key || "XRPL_POLICY_REJECTED";
+}
+
+function policyReason(policy: PolicyResult) {
+  return policy.checks.filter((check) => !check.passed).map((check) => check.detail).join(" ")
+    || "The transaction did not pass XRPL settlement policy checks.";
+}
+
+function appendXrplAudit(
+  caseRecord: CaseRecord,
+  intent: XrplSettlementIntent,
+  status: AuditRecord["status"],
+  detail: string,
+  options: {
+    code?: string; hash?: string; ledgerIndex?: number; result?: string;
+    validated?: boolean; signed?: boolean; submitted?: boolean;
+  } = {},
+) {
+  const settlement = caseRecord.xrplSettlement;
+  caseRecord.escrow.audit.push({
+    id: randomUUID(), action: "Payment", status, createdAt: now(), network: "testnet",
+    caseId: caseRecord.id, amountCents: intent.amountUsdCents, source: intent.source,
+    attemptedCaseId: intent.caseId, settlementId: intent.settlementId,
+    requestedAction: intent.requestedAction, requestedTransactionType: intent.transactionType,
+    requestedNetwork: intent.network,
+    destination: intent.destination, amountDrops: intent.amountDrops,
+    approvedAmountDrops: settlement?.amountDrops, detail, ...options,
+  });
+  caseRecord.updatedAt = now();
+}
+
+function applyXrplReceipt(caseRecord: CaseRecord, receipt: XrplReceipt) {
+  const settlement = caseRecord.xrplSettlement;
+  if (!settlement) throw new ApiError(500, "The XRPL receipt has no case settlement authorization.", false, "XRPL_RECEIPT_MISMATCH");
+  if (settlement.status === "validated") {
+    if (settlement.hash !== receipt.hash) {
+      throw new ApiError(500, "The stored XRPL receipt does not match the durable receipt.", false, "XRPL_RECEIPT_MISMATCH");
+    }
+    return;
+  }
+  settlement.status = "validated";
+  settlement.hash = receipt.hash;
+  settlement.ledgerIndex = receipt.ledgerIndex;
+  settlement.result = receipt.result;
+  settlement.validatedAt = receipt.validatedAt;
+  settlement.detail = "Validated tesSUCCESS on XRPL Testnet.";
+  delete settlement.errorCode;
+  caseRecord.escrow.status = "released";
+  caseRecord.escrow.finishHash = receipt.hash;
+  caseRecord.escrow.releasedAt = receipt.validatedAt;
+  const intent = makeXrplIntent(caseRecord);
+  if (!caseRecord.escrow.audit.some((entry) => entry.action === "Payment"
+    && entry.status === "validated" && entry.hash === receipt.hash)) {
+    appendXrplAudit(caseRecord, intent, "validated", "Real Test XRP Payment reached a validated tesSUCCESS ledger result.", {
+      hash: receipt.hash, ledgerIndex: receipt.ledgerIndex, result: receipt.result,
+      validated: true, signed: true, submitted: true,
+    });
+    event(caseRecord, "XRPL Testnet settlement validated",
+      `${receipt.amountDrops} drops reached the authorized recipient. Transaction ${receipt.hash}.`, "escrow");
+  }
+  updateStatus(caseRecord);
+}
+
+function rejectXrplPolicy(
+  caseRecord: CaseRecord,
+  intent: XrplSettlementIntent,
+  policy: PolicyResult,
+  explicitCode?: string,
+): never {
+  const code = explicitCode ?? failedPolicyCode(policy);
+  const detail = policyReason(policy);
+  appendXrplAudit(caseRecord, intent, "rejected", detail, { code, signed: false, submitted: false });
+  throw new ApiError(409, detail, true, code, policy, caseRecord);
+}
+
+function throwXrplError(caseRecord: CaseRecord, intent: XrplSettlementIntent, error: unknown): never {
+  const settlement = caseRecord.xrplSettlement;
+  const xrplError = error instanceof XrplError ? error : undefined;
+  const code = xrplError?.reason || "XRPL_EXECUTION_FAILED";
+  const detail = error instanceof Error ? error.message : "XRPL settlement failed before validation.";
+  const pending = settlement?.status === "pending";
+  if (settlement) {
+    settlement.errorCode = code;
+    settlement.detail = detail;
+    if (!pending) settlement.status = "failed";
+    if (xrplError?.ledgerResult) {
+      settlement.status = "failed";
+      settlement.result = xrplError.ledgerResult;
+    }
+  }
+  appendXrplAudit(caseRecord, intent, xrplError?.policy && !xrplError.policy.approved ? "rejected" : "failed",
+    detail, { code, hash: xrplError?.submittedHash, signed: pending || Boolean(xrplError?.submittedHash),
+      submitted: Boolean(xrplError?.submittedHash), validated: Boolean(xrplError?.ledgerResult),
+      result: xrplError?.ledgerResult });
+  const temporarilyUnavailable = ["XRPL_VALIDATION_PENDING", "XRPL_SUBMISSION_UNCERTAIN", "XRPL_UNAVAILABLE"]
+    .includes(code);
+  throw new ApiError(temporarilyUnavailable ? 503 : 409, detail, true,
+    code, xrplError?.policy, caseRecord);
 }
 
 function financialFailure(caseRecord: CaseRecord, intent: TransactionIntent, policy: PolicyResult): never {
@@ -97,7 +236,8 @@ function simulateSigningBoundary(caseRecord: CaseRecord, intent: Readonly<Transa
 
 export async function createCase(ownerId: string, input: z.infer<typeof newCaseSchema>) {
   const building = await lookupBuilding(input.address, input.borough);
-  return mutateSession(ownerId, (document) => {
+  return mutateSession(ownerId, async (document) => {
+    await assertSessionNoPendingSettlement(document);
     if (document.cases.length >= 20) throw new ApiError(409, "This demo allows up to 20 cases per session.");
     const caseRecord = createNewCase(ownerId, { ...input, building });
     caseRecord.accountBalanceCents = document.accountBalanceCents;
@@ -107,8 +247,9 @@ export async function createCase(ownerId: string, input: z.infer<typeof newCaseS
 }
 
 export async function addUploadedEvidence(ownerId: string, caseId: string, evidence: EvidenceRecord) {
-  return mutateSession(ownerId, (document) => {
+  return mutateSession(ownerId, async (document) => {
     const caseRecord = findCase(document, caseId);
+    await assertNoPendingSettlement(caseRecord);
     assertMutable(caseRecord);
     assertCapacity(caseRecord);
     caseRecord.evidence.push(evidence);
@@ -118,7 +259,140 @@ export async function addUploadedEvidence(ownerId: string, caseId: string, evide
   });
 }
 
-async function applyAction(document: SessionDocument, caseRecord: CaseRecord, action: CaseAction): Promise<CaseActionResult> {
+async function applyAction(
+  document: SessionDocument,
+  caseRecord: CaseRecord,
+  action: CaseAction,
+  mutation: SessionMutationContext,
+): Promise<CaseActionResult> {
+  if (action.action === "xrpl_security_demo") {
+    if (!caseRecord.xrplSettlement) {
+      throw new ApiError(409, "Enable XRPL Testnet settlement before running its security demonstrations.", false,
+        "XRPL_NOT_ENABLED");
+    }
+    const demonstration = runXrplSecurityDemo(caseRecord, document.ownerId, action.scenario);
+    const scenarioCode: Record<typeof action.scenario, string> = {
+      wallet_switch: "DESTINATION_WALLET_MISMATCH",
+      amount_tamper: "AMOUNT_OUTSIDE_AUTHORIZATION",
+      prompt_injection: "DESTINATION_WALLET_MISMATCH",
+      insufficient_funds: "INSUFFICIENT_XRPL_FUNDS",
+      duplicate: "SETTLEMENT_ALREADY_COMPLETED",
+      wrong_network: "WRONG_NETWORK",
+      wrong_case: "WRONG_CASE",
+      unsupported_action: "ACTION_OUTSIDE_PERMISSION_SCOPE",
+    };
+    const targeted = demonstration.policy.checks.find((check) => check.key === scenarioCode[action.scenario] && !check.passed);
+    if (targeted) {
+      demonstration.policy.checks = [targeted, ...demonstration.policy.checks.filter((check) => check !== targeted)];
+    }
+    const status = demonstration.policy.approved ? "validated" : "rejected";
+    appendXrplAudit(caseRecord, demonstration.intent, status,
+      `Security demo only. ${demonstration.detail}`, {
+        code: demonstration.policy.approved ? undefined : scenarioCode[action.scenario],
+        signed: false, submitted: false,
+      });
+    event(caseRecord, demonstration.policy.approved ? "XRPL security check passed" : "XRPL attack blocked",
+      demonstration.detail, "escrow");
+    return { case: caseRecord, policy: demonstration.policy };
+  }
+  if (caseRecord.xrplSettlement?.status === "pending"
+    && action.action !== "settle_xrpl" && action.action !== "reconcile_xrpl") {
+    await assertNoPendingSettlement(caseRecord);
+  } else if (action.action !== "settle_xrpl" && action.action !== "reconcile_xrpl") {
+    await assertSessionNoPendingSettlement(document);
+  }
+  if (action.action === "settle_xrpl") {
+    const settlement = caseRecord.xrplSettlement;
+    if (!settlement) throw new ApiError(409, "Enable XRPL Testnet settlement first.", false, "XRPL_NOT_ENABLED");
+    return withXrplWalletLock(settlement.source, async () => {
+      const journal = await readXrplJournal(settlement);
+      if (journal?.status === "validated" && journal.receipt) {
+        applyXrplReceipt(caseRecord, journal.receipt);
+        const duplicatePolicy = evaluateXrplPolicy(caseRecord, makeXrplIntent(caseRecord), document.ownerId);
+        rejectXrplPolicy(caseRecord, makeXrplIntent(caseRecord), duplicatePolicy,
+          "SETTLEMENT_ALREADY_COMPLETED");
+      }
+      if (journal?.status === "pending") {
+        Object.assign(settlement, {
+          status: "pending", hash: journal.pending.hash, sequence: journal.pending.sequence,
+          lastLedgerSequence: journal.pending.lastLedgerSequence,
+          detail: "A durable pending transaction must be reconciled before any signing retry.",
+        });
+        const pendingPolicy = evaluateXrplPolicy(caseRecord, makeXrplIntent(caseRecord), document.ownerId);
+        rejectXrplPolicy(caseRecord, makeXrplIntent(caseRecord), pendingPolicy, "SETTLEMENT_PENDING");
+      }
+      const intent = Object.freeze(makeXrplIntent(caseRecord));
+      const policy = evaluateXrplPolicy(caseRecord, intent, document.ownerId);
+      if (!policy.approved) rejectXrplPolicy(caseRecord, intent, policy);
+      let persistedPending: XrplPending | undefined;
+      try {
+        const receipt = await executeXrplSettlement({
+          ownerId: document.ownerId,
+          loadCase: async () => structuredClone(caseRecord),
+          beforeSubmit: async (pending) => {
+            const finalPolicy = evaluateXrplPolicy(caseRecord, pending.intent, document.ownerId);
+            if (!finalPolicy.approved) rejectXrplPolicy(caseRecord, pending.intent, finalPolicy);
+            await recordXrplPending(settlement, pending);
+            persistedPending = pending;
+            Object.assign(settlement, {
+              status: "pending", hash: pending.hash, sequence: pending.sequence,
+              lastLedgerSequence: pending.lastLedgerSequence,
+              detail: `Signed transaction prepared at ledger ${pending.preparedLedgerIndex}; durable reconciliation is required after submission.`,
+            });
+            event(caseRecord, "XRPL transaction prepared",
+              "The signed transaction hash was durably recorded before network submission.", "escrow");
+            await mutation.checkpoint();
+          },
+        });
+        if (!persistedPending) {
+          throw new ApiError(500, "The XRPL adapter returned a receipt without a durable pending checkpoint.", false,
+            "XRPL_JOURNAL_MISMATCH");
+        }
+        await recordXrplValidated(settlement, persistedPending, receipt);
+        applyXrplReceipt(caseRecord, receipt);
+        return { case: caseRecord, policy };
+      } catch (error) {
+        if (error instanceof ApiError) throw error;
+        throwXrplError(caseRecord, intent, error);
+      }
+    });
+  }
+  if (action.action === "reconcile_xrpl") {
+    const settlement = caseRecord.xrplSettlement;
+    if (!settlement) throw new ApiError(409, "Enable XRPL Testnet settlement first.", false, "XRPL_NOT_ENABLED");
+    return withXrplWalletLock(settlement.source, async () => {
+      const journal = await readXrplJournal(settlement);
+      if (journal?.status === "validated" && journal.receipt) {
+        applyXrplReceipt(caseRecord, journal.receipt);
+        return { case: caseRecord };
+      }
+      if (!journal || journal.status !== "pending") {
+        throw new ApiError(409, "There is no durable pending XRPL transaction to reconcile.", false,
+          "XRPL_NOT_PENDING");
+      }
+      Object.assign(settlement, {
+        status: "pending", hash: journal.pending.hash, sequence: journal.pending.sequence,
+        lastLedgerSequence: journal.pending.lastLedgerSequence,
+      });
+      const intent = journal.pending.intent;
+      try {
+        const receipt = await reconcileXrplSettlement({
+          ownerId: document.ownerId,
+          loadCase: async () => structuredClone(caseRecord),
+          beforeSubmit: async () => {
+            throw new ApiError(500, "Reconciliation cannot submit or sign another transaction.", false,
+              "XRPL_RECONCILE_SUBMISSION_BLOCKED");
+          },
+        }, journal.pending);
+        await recordXrplValidated(settlement, journal.pending, receipt);
+        applyXrplReceipt(caseRecord, receipt);
+        return { case: caseRecord };
+      } catch (error) {
+        if (error instanceof ApiError) throw error;
+        throwXrplError(caseRecord, intent, error);
+      }
+    });
+  }
   if (action.action === "release_escrow" && caseRecord.escrow.status === "released") return { case: caseRecord };
   assertMutable(caseRecord);
 
@@ -248,6 +522,24 @@ async function applyAction(document: SessionDocument, caseRecord: CaseRecord, ac
       break;
     }
     case "release_escrow": {
+      if (caseRecord.xrplSettlement && caseRecord.xrplSettlement.status !== "validated") {
+        const intent = makeXrplIntent(caseRecord);
+        const evaluated = evaluateXrplPolicy(caseRecord, intent, document.ownerId);
+        const policy: PolicyResult = {
+          approved: false,
+          checks: [...evaluated.checks, {
+            key: "XRPL_SETTLEMENT_REQUIRED", label: "XRPL settlement validated", passed: false,
+            detail: "The enabled Testnet payment must reach a validated tesSUCCESS result before USD release.",
+          }],
+        };
+        appendXrplAudit(caseRecord, intent, "rejected",
+          "The simulated USD escrow cannot be released while its enabled XRPL settlement is unvalidated.", {
+            code: "XRPL_SETTLEMENT_REQUIRED", signed: false, submitted: false,
+          });
+        throw new ApiError(409,
+          "Complete and validate the XRPL Testnet settlement before releasing this enabled escrow.",
+          true, "XRPL_SETTLEMENT_REQUIRED", policy, caseRecord);
+      }
       const intent = Object.freeze(makeIntent(caseRecord, "EscrowFinish"));
       const policy = evaluatePolicy(caseRecord, intent);
       if (!policy.approved) financialFailure(caseRecord, intent, policy);
@@ -259,6 +551,25 @@ async function applyAction(document: SessionDocument, caseRecord: CaseRecord, ac
       updateStatus(caseRecord);
       event(caseRecord, "Demo escrow released", "The verified escrow was released in the simulation and the case is resolved.", "escrow");
       return { case: caseRecord, policy };
+    }
+    case "enable_xrpl": {
+      if (caseRecord.xrplSettlement) return { case: caseRecord };
+      if (caseRecord.escrow.status !== "locked") {
+        throw new ApiError(409, "Fund the simulated USD escrow before enabling its XRPL settlement.", false,
+          "ESCROW_NOT_FUNDED");
+      }
+      try {
+        caseRecord.xrplSettlement = createXrplSettlement(caseRecord);
+      } catch (error) {
+        if (error instanceof XrplError) {
+          throw new ApiError(503, error.message, false, error.reason, error.policy, caseRecord);
+        }
+        throw error;
+      }
+      event(caseRecord, "XRPL Testnet settlement enabled",
+        `${caseRecord.xrplSettlement.amountDrops} drops are pinned to the authorized source and recipient for this case.`,
+        "escrow");
+      break;
     }
     case "add_expense": {
       if (caseRecord.expenses.length >= 200) throw new ApiError(409, "This case has reached its demo expense limit.");
@@ -290,5 +601,5 @@ async function applyAction(document: SessionDocument, caseRecord: CaseRecord, ac
 }
 
 export async function performCaseAction(ownerId: string, caseId: string, action: CaseAction) {
-  return mutateSession(ownerId, (document) => applyAction(document, findCase(document, caseId), action));
+  return mutateSession(ownerId, (document, mutation) => applyAction(document, findCase(document, caseId), action, mutation));
 }
