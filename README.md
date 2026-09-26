@@ -46,7 +46,7 @@ limitations.
 | --- | --- |
 | NYC Open Data | Public building complaint and violation lookup; explicit warnings on unavailable data |
 | Gemini | Server-side structured evidence analysis and before/after comparison when configured |
-| Nessie | Opt-in mock account, rent, and transaction context |
+| Nessie | Verified sandbox customer/account binding, rent history, tenant-reviewed costs, and account-substitution guardrail |
 | Photon | Opt-in approved-recipient outbound iMessage; demo replies by default |
 | MongoDB Atlas | Session records and GridFS uploads when configured; local atomic JSON persistence by default |
 | XRPL | Isolated, guarded testnet tooling; application escrow is always simulated USD |
@@ -55,6 +55,13 @@ For Atlas, follow [database setup](docs/mongodb-atlas.md), then run
 `pnpm db:check` to verify indexes and a temporary write/read/delete probe.
 An Atlas Administration API key is not needed. Switching storage does not
 automatically import existing local cases.
+
+For Nessie, follow [financial verification setup](docs/nessie.md), then run
+`pnpm nessie:check`. The Finances view separates the verified sandbox bank balance
+from simulated escrow funds and requires confirmation before imported purchases
+count toward issue impact. Its account-substitution check demonstrates a blocked
+authorization without sending a payment. Existing expense snapshots are retained
+when switching providers; they are not silently rewritten or reclassified.
 
 ## Verification
 
@@ -65,14 +72,20 @@ pnpm build
 pnpm test:e2e
 ```
 
-The end-to-end tests use local Chrome and start a local server if needed. An
-already-running server is reused. Set `E2E_BASE_URL` to test another local port.
-Tests create isolated demo sessions; they do not send real messages or submit
-ledger transactions. Run them without live provider credentials.
+The end-to-end tests use local Chrome and a dedicated server on port 3100. They
+refuse to reuse an existing server and explicitly disable live storage and
+providers, so `.env.local` cannot enable Atlas, Nessie, Gemini, Photon, or XRPL
+in the test server. Stop `pnpm dev` first because both processes use Next's build
+directory; keep its normal port 3000 separate from the test port. `E2E_BASE_URL`
+can select another unused local port. Tests create isolated demo sessions and
+never send real messages or submit ledger transactions.
 
 Tests cover policy tampering, insufficient funds, release prerequisites,
 concurrent duplicate funding, persistent state, tenant isolation, upload
-validation, and the full repair-to-settlement flow.
+validation, Nessie ownership and stale verification, confirmed-cost deduplication,
+provider corrections, account substitution, and the full repair-to-settlement
+flow. Nessie browser tests intercept the API and exercise failure states without
+mutating provider data.
 
 ## Structure
 
@@ -92,7 +105,8 @@ delivery/reconciliation handling.
 
 ## Scope
 
-Implemented from the 16-page planning PDF supplied on September 26, 2026.
+Implemented from the original 16-page planning PDF and the eight-page Nessie
+integration addendum supplied on September 26, 2026.
 [Implementation contract](docs/implementation-contract.md) records the shared
 API and state invariants. [Asset provenance](docs/asset-provenance.md) records the
 generated demonstration images. This prototype organizes evidence and demonstrates

@@ -66,6 +66,49 @@ export interface ExpenseRecord {
   date: string;
   category: string;
   source: "demo" | "manual" | "nessie";
+  transactionId?: string;
+}
+
+export type NessieReasonCode = "NESSIE_NOT_CONFIGURED" | "NESSIE_API_UNAVAILABLE" | "NESSIE_INVALID_RESPONSE"
+  | "NESSIE_INVALID_ID" | "NESSIE_CUSTOMER_NOT_FOUND" | "NESSIE_ACCOUNT_NOT_FOUND"
+  | "NESSIE_CUSTOMER_MISMATCH" | "NESSIE_ACCOUNT_MISMATCH" | "NESSIE_TENANT_MISMATCH"
+  | "NESSIE_CASE_MISMATCH" | "NESSIE_OWNERSHIP_MISMATCH" | "NESSIE_INSUFFICIENT_BALANCE"
+  | "NESSIE_VERIFICATION_REQUIRED" | "NESSIE_VERIFICATION_STALE" | "NESSIE_LIVE_VERIFICATION_REQUIRED";
+
+export interface FinancialBinding {
+  tenantId: string;
+  caseId: string;
+  customerId: string;
+  accountId: string;
+  source: "demo" | "nessie";
+}
+
+export interface FinancialTransaction {
+  id: string;
+  label: string;
+  amountCents: number;
+  date: string;
+  category: string;
+  source: "demo" | "nessie";
+  relatedStatus: "suggested" | "confirmed" | "dismissed";
+  suggestionReason?: string;
+  providerStatus?: "changed" | "missing";
+  reviewNote?: string;
+  confirmedAmountCents?: number;
+}
+
+export interface FinancialProfile {
+  binding: FinancialBinding;
+  status: "unverified" | "verified" | "unavailable" | "rejected";
+  reasonCode?: NessieReasonCode;
+  detail: string;
+  checkedAt?: string;
+  expiresAt?: string;
+  accountBalanceCents?: number;
+  customerVerified: boolean;
+  accountVerified: boolean;
+  ownershipVerified: boolean;
+  transactions: FinancialTransaction[];
 }
 
 export interface RentPayment {
@@ -86,6 +129,7 @@ export interface PolicyCheck {
 export interface PolicyResult {
   approved: boolean;
   checks: PolicyCheck[];
+  reasonCodes?: NessieReasonCode[];
 }
 
 export interface AuditRecord {
@@ -132,6 +176,7 @@ export interface CaseRecord {
   monthlyRentCents: number;
   disputedAmountCents: number;
   accountBalanceCents: number;
+  financialProfile?: FinancialProfile;
   evidence: EvidenceRecord[];
   messages: CaseMessage[];
   timeline: TimelineEvent[];
@@ -163,6 +208,9 @@ export interface TransactionIntent {
   destination: string;
   amountCents: number;
   network: string;
+  tenantId?: string;
+  nessieCustomerId?: string;
+  nessieAccountId?: string;
 }
 
 export type CaseAction =
@@ -176,4 +224,7 @@ export type CaseAction =
   | { action: "release_escrow" }
   | { action: "add_expense"; label: string; amountCents: number; category: string }
   | { action: "sync_finances" }
+  | { action: "confirm_transaction"; transactionId: string }
+  | { action: "dismiss_transaction"; transactionId: string }
+  | { action: "check_financial_binding"; scenario: "valid" | "substitution" }
   | { action: "policy_check"; intent: TransactionIntent };

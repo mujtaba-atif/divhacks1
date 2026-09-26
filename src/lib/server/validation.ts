@@ -31,6 +31,9 @@ const transactionIntentSchema = z.object({
   destination: text(240),
   amountCents: z.number().int().min(0).max(100_000_000),
   network: text(80),
+  tenantId: text(120).optional(),
+  nessieCustomerId: text(120).optional(),
+  nessieAccountId: text(120).optional(),
 }).strict();
 
 export const actionSchema = z.discriminatedUnion("action", [
@@ -44,6 +47,9 @@ export const actionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("release_escrow") }).strict(),
   z.object({ action: z.literal("add_expense"), label: text(160), amountCents: cents, category: text(80) }).strict(),
   z.object({ action: z.literal("sync_finances") }).strict(),
+  z.object({ action: z.literal("confirm_transaction"), transactionId: text(160) }).strict(),
+  z.object({ action: z.literal("dismiss_transaction"), transactionId: text(160) }).strict(),
+  z.object({ action: z.literal("check_financial_binding"), scenario: z.enum(["valid", "substitution"]) }).strict(),
   z.object({ action: z.literal("policy_check"), intent: transactionIntentSchema }).strict(),
 ]);
 

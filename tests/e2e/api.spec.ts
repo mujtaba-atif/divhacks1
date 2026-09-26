@@ -3,7 +3,7 @@ import path from "node:path";
 import { readFile } from "node:fs/promises";
 import type { CaseRecord } from "../../src/lib/types";
 
-const origin = process.env.E2E_BASE_URL || "http://127.0.0.1:3000";
+const origin = new URL(process.env.E2E_BASE_URL || "http://127.0.0.1:3100").origin;
 async function dashboard(request: APIRequestContext) {
   const response = await request.get("/api/dashboard");
   expect(response.ok()).toBeTruthy();
