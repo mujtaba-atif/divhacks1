@@ -1,13 +1,14 @@
 import "server-only";
 
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createDemoCase } from "@/lib/seed";
 import type { CaseRecord } from "@/lib/types";
 import type { RegisteredUser } from "./auth";
 import type { DigitalContract } from "./contracts";
 import { ApiError } from "./errors";
+import { readXrplJournal } from "./xrpl-journal";
 import { assertSessionSize, readMongoSession, saveMongoSession } from "./mongodb-store";
 
 export interface SessionDocument {
@@ -24,9 +25,10 @@ export interface SessionDocument {
   contracts?: DigitalContract[];
 }
 
-const sharedRuntime = globalThis as typeof globalThis & { rentEscrowSessionLocks?: Map<string, Promise<void>> };
-const sessionLocks = sharedRuntime.rentEscrowSessionLocks ??= new Map<string, Promise<void>>();
+const sharedRuntime = globalThis as typeof globalThis & { rentEscrowLocks?: Map<string, Promise<void>> };
+const runtimeLocks = sharedRuntime.rentEscrowLocks ??= new Map<string, Promise<void>>();
 const dataDirectory = path.join(process.cwd(), ".data", "sessions");
+const lockDirectory = path.join(process.cwd(), ".data", "locks");
 
 function mongoEnabled() {
   const mode = process.env.RENTESCROW_STORAGE || "local";
@@ -62,8 +64,11 @@ async function saveSession(document: SessionDocument, expectedRevision?: number)
   const target = filename(document.ownerId);
   const temporary = `${target}.${randomBytes(8).toString("hex")}.tmp`;
   try {
-    await writeFile(temporary, serialized, { mode: 0o600, flag: "wx" });
+    const file = await open(temporary, "wx", 0o600);
+    try { await file.writeFile(serialized); await file.sync(); } finally { await file.close(); }
     await rename(temporary, target);
+    const directory = await open(dataDirectory, "r");
+    try { await directory.sync(); } finally { await directory.close(); }
   } finally {
     await unlink(temporary).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== "ENOENT") throw error;
@@ -98,45 +103,116 @@ export function ownerIdFromToken(token: string) {
 }
 
 // Session-level serialization also protects the shared balance across different cases.
-async function serialize<T>(ownerId: string, operation: () => Promise<T>): Promise<T> {
-  const previous = sessionLocks.get(ownerId) || Promise.resolve();
+function lockPath(kind: "session" | "wallet", key: string) {
+  const digest = createHash("sha256").update(`${kind}\0${key}`).digest("hex");
+  return path.join(lockDirectory, `${kind}-${digest}.lock`);
+}
+
+async function acquireFileLock(kind: "session" | "wallet", key: string) {
+  await mkdir(lockDirectory, { recursive: true, mode: 0o700 });
+  const target = lockPath(kind, key);
+  const deadline = Date.now() + 15_000;
+  while (true) {
+    try {
+      await mkdir(target, { mode: 0o700 });
+      try {
+        await writeFile(path.join(target, "owner"), `${process.pid}\n${new Date().toISOString()}\n`, {
+          mode: 0o600, flag: "wx",
+        });
+      } catch (error) {
+        await rmdir(target).catch(() => undefined);
+        throw error;
+      }
+      return async () => {
+        await unlink(path.join(target, "owner")).catch(() => undefined);
+        await rmdir(target).catch(() => undefined);
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (Date.now() >= deadline) {
+        throw new ApiError(423,
+          `This ${kind} is locked by another settlement operation. If its process stopped unexpectedly, an operator must remove the recorded lock after checking XRPL.`,
+          false, "XRPL_OPERATION_LOCKED");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
+
+async function serialize<T>(kind: "session" | "wallet", key: string, operation: () => Promise<T>): Promise<T> {
+  const runtimeKey = `${kind}:${key}`;
+  const previous = runtimeLocks.get(runtimeKey) || Promise.resolve();
   let release!: () => void;
   const current = new Promise<void>((resolve) => { release = resolve; });
-  sessionLocks.set(ownerId, current);
+  runtimeLocks.set(runtimeKey, current);
   await previous;
+  let releaseFile: (() => Promise<void>) | undefined;
   try {
+    releaseFile = await acquireFileLock(kind, key);
     return await operation();
   } finally {
+    await releaseFile?.();
     release();
-    if (sessionLocks.get(ownerId) === current) sessionLocks.delete(ownerId);
+    if (runtimeLocks.get(runtimeKey) === current) runtimeLocks.delete(runtimeKey);
   }
+}
+
+export interface SessionMutationContext {
+  /** Atomically persists the current mutation before an external side effect. */
+  checkpoint(): Promise<void>;
 }
 
 export async function mutateSession<T>(
   ownerId: string,
-  operation: (document: SessionDocument) => Promise<T> | T,
+  operation: (document: SessionDocument, context: SessionMutationContext) => Promise<T> | T,
 ): Promise<T> {
-  return serialize(ownerId, async () => {
+  return serialize("session", ownerId, async () => {
     const document = await readSession(ownerId);
     if (!document) throw new ApiError(401, "Your demo session expired. Reload the page to start again.");
-    const revision = document.revision;
+    let expectedRevision = document.revision;
+    const checkpoint = async () => {
+      document.revision = expectedRevision + 1;
+      await saveSession(document, expectedRevision);
+      expectedRevision = document.revision;
+    };
     try {
-      const result = await operation(document);
-      document.revision = revision + 1;
-      await saveSession(document, revision);
+      const result = await operation(document, { checkpoint });
+      await checkpoint();
       return result;
     } catch (error) {
       if (error instanceof ApiError && error.persistAudit) {
-        document.revision = revision + 1;
-        await saveSession(document, revision);
+        await checkpoint();
       }
       throw error;
     }
   });
 }
 
+/** Lock order is always session first, then wallet. Call only from mutateSession. */
+export async function withXrplWalletLock<T>(source: string, operation: () => Promise<T>): Promise<T> {
+  if (mongoEnabled()) {
+    throw new ApiError(503,
+      "Live XRPL settlement is disabled with MongoDB session storage until a shared distributed wallet lock is configured. Use local storage for this single-host demo.",
+      false, "XRPL_DISTRIBUTED_LOCK_REQUIRED");
+  }
+  return serialize("wallet", source, operation);
+}
+
 export async function resetSession(ownerId: string) {
-  return mutateSession(ownerId, (document) => {
+  return mutateSession(ownerId, async (document) => {
+    for (const item of document.cases) {
+      const journal = item.xrplSettlement ? await readXrplJournal(item.xrplSettlement) : null;
+      if (item.xrplSettlement?.status === "pending" || journal?.status === "pending") {
+        throw new ApiError(409, "Reconcile the pending XRPL transaction before resetting this session.", false, "SETTLEMENT_PENDING");
+      }
+      if (journal?.status === "validated") {
+        throw new ApiError(409, "Apply the durable validated XRPL receipt before resetting this session.", false,
+          "SETTLEMENT_ALREADY_COMPLETED");
+      }
+    }
+    if (document.cases.some((item) => item.xrplSettlement?.status === "validated")) {
+      throw new ApiError(409, "This session contains a validated on-chain receipt and cannot be reset. Start a new browser session to preserve its audit record.", false, "SETTLEMENT_ALREADY_COMPLETED");
+    }
     const fresh = seedSession(ownerId);
     document.cases = fresh.cases;
     document.accountBalanceCents = fresh.accountBalanceCents;
