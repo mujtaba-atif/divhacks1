@@ -43,6 +43,18 @@ async function setup(t: TestContext) {
   return { ownerId, caseId, source };
 }
 
+function mockNessie(t: TestContext, ownerId: string) {
+  environment(t, { NESSIE_ENABLED: "true", NESSIE_API_KEY: "test-only", NESSIE_TENANT_ID: ownerId,
+    NESSIE_CUSTOMER_ID: "customer_123", NESSIE_ACCOUNT_ID: "account_456" });
+  t.mock.method(globalThis, "fetch", async (input: URL | RequestInfo) => {
+    const pathname = new URL(String(input)).pathname;
+    if (pathname === "/customers/customer_123") return Response.json({ _id: "customer_123" });
+    if (pathname === "/accounts/account_456") return Response.json({ _id: "account_456", customer_id: "customer_123", balance: 2430 });
+    if (pathname.endsWith("/purchases") || pathname.endsWith("/bills")) return Response.json([]);
+    throw new Error(`Unexpected provider request: ${pathname}`);
+  });
+}
+
 async function makeRepairReady(ownerId: string, caseId: string) {
   await performCaseAction(ownerId, caseId, { action: "simulate_landlord_reply", variant: "completed" });
   const evidence = await performCaseAction(ownerId, caseId, { action: "add_demo_evidence", stage: "after" });
@@ -170,6 +182,7 @@ test("verification expiring after signing records signed but never submitted", a
 
 test("armed agent waits for case conditions, then confirmation settles exactly once", async (t) => {
   const prepared = await setup(t);
+  mockNessie(t, prepared.ownerId);
   const armed = await performCaseAction(prepared.ownerId, prepared.caseId, { action: "authorize_xrpl_agent" });
   assert.ok(armed.case.xrplSettlement?.agentAuthorizedAt);
   assert.equal(armed.case.xrplSettlement?.agentRequestedAt, undefined);
@@ -218,6 +231,7 @@ test("unauthorized authenticated workspace cannot arm or trigger the settlement 
 
 test("agent policy denial preserves confirmation, records rejection, and never signs", async (t) => {
   const prepared = await setup(t);
+  mockNessie(t, prepared.ownerId);
   await performCaseAction(prepared.ownerId, prepared.caseId, { action: "authorize_xrpl_agent" });
   await makeRepairReady(prepared.ownerId, prepared.caseId);
   await mutateSession(prepared.ownerId, (document) => {
@@ -248,4 +262,42 @@ test("agent policy denial preserves confirmation, records rejection, and never s
   const manual = await performCaseAction(prepared.ownerId, prepared.caseId, { action: "settle_xrpl" });
   assert.equal(manual.case.xrplSettlement?.status, "validated");
   assert.equal(manual.case.escrow.audit.at(-1)?.actor, "tenant");
+});
+
+
+test("autonomous settlement cannot treat an explicit demo profile as live financial verification", async (t) => {
+  const prepared = await setup(t);
+  await performCaseAction(prepared.ownerId, prepared.caseId, { action: "authorize_xrpl_agent" });
+  await makeRepairReady(prepared.ownerId, prepared.caseId);
+  const ledger = mockLedger(t, prepared.source);
+  const signer = t.mock.method(Wallet.prototype, "sign", () => { throw new Error("Must not sign"); });
+  await assert.rejects(performCaseAction(prepared.ownerId, prepared.caseId, { action: "confirm_resolution" }),
+    (error: unknown) => error instanceof ApiError && error.code === "FINANCIAL_CONTEXT_NOT_VERIFIED");
+  const record = (await readSession(prepared.ownerId))!.cases[0];
+  assert.equal(record.financialPolicyContext?.financiallyReady, false);
+  assert.equal(record.tenantConfirmed, true);
+  assert.equal(signer.mock.callCount(), 0);
+  assert.equal(ledger.connect.mock.callCount(), 0);
+  assert.equal(ledger.submit.mock.callCount(), 0);
+});
+
+test("a live Nessie outage blocks autonomous settlement before ledger access or signing", async (t) => {
+  const prepared = await setup(t);
+  mockNessie(t, prepared.ownerId);
+  await performCaseAction(prepared.ownerId, prepared.caseId, { action: "sync_finances" });
+  await performCaseAction(prepared.ownerId, prepared.caseId, { action: "authorize_xrpl_agent" });
+  await makeRepairReady(prepared.ownerId, prepared.caseId);
+  t.mock.method(globalThis, "fetch", async () => new Response("Unavailable", { status: 503 }));
+  const ledger = mockLedger(t, prepared.source);
+  const signer = t.mock.method(Wallet.prototype, "sign", () => { throw new Error("Must not sign"); });
+  await assert.rejects(performCaseAction(prepared.ownerId, prepared.caseId, { action: "confirm_resolution" }),
+    (error: unknown) => error instanceof ApiError && error.code === "NESSIE_API_UNAVAILABLE");
+  const record = (await readSession(prepared.ownerId))!.cases[0];
+  assert.equal(record.financialPolicyContext?.financiallyReady, false);
+  assert.equal(record.financialProfile?.binding.source, "nessie");
+  assert.equal(record.financialProfile?.accountBalanceCents, undefined);
+  assert.equal(record.escrow.status, "locked");
+  assert.equal(signer.mock.callCount(), 0);
+  assert.equal(ledger.connect.mock.callCount(), 0);
+  assert.equal(ledger.submit.mock.callCount(), 0);
 });

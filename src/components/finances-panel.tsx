@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertCircle, CalendarDays, Check, CheckCircle2, Clock3, FileText, FlaskConical, Landmark, Plus, RefreshCw, ShieldCheck, ShieldX, Wallet, X } from "lucide-react";
 import type { CaseRecord, FinancialProfile, FinancialTransaction, PolicyResult } from "@/lib/types";
 import type { RunAction } from "./case-panels";
@@ -37,16 +37,36 @@ export function FinancesPanel({ record, pending, onAction, onExpense, policy, ne
   nessieConfigured?: boolean;
 }) {
   const [filter, setFilter] = useState<TransactionFilter>("all");
-  const profile = record.financialProfile;
-  const fresh = useFreshVerification(profile);
+  const attemptedCase = useRef<string | null>(null);
+  const [failedCase, setFailedCase] = useState<string | null>(null);
+  const [checkedCase, setCheckedCase] = useState<string | null>(null);
+  const liveRequested = nessieConfigured || record.financialProfile?.binding.source === "nessie";
+  // A seeded fixture is not a live banking snapshot while the first server check is in flight.
+  const profile = liveRequested && record.financialProfile?.binding.source === "demo" ? undefined : record.financialProfile;
+  const verified = useFreshVerification(profile);
   const resolved = record.status === "resolved";
-  const unavailable = profile?.status === "unavailable" || profile?.status === "rejected";
+  const requestFailed = failedCase === record.id;
+  const fresh = verified && !resolved && !requestFailed && (!liveRequested || checkedCase === record.id);
+  const unavailable = requestFailed || profile?.status === "unavailable" || profile?.status === "rejected";
+  async function refreshProfile() {
+    setFailedCase(null);
+    setCheckedCase(null);
+    const result = await onAction({ action: "sync_finances" });
+    if (!result) setFailedCase(record.id);
+    else setCheckedCase(record.id);
+  }
+  useEffect(() => {
+    if (!liveRequested || resolved || pending || attemptedCase.current === record.id) return;
+    attemptedCase.current = record.id;
+    // A cached profile may predate a server configuration change, even within its TTL.
+    void refreshProfile();
+  }, [liveRequested, resolved, pending, record.id, onAction]);
   const stale = profile?.status === "verified" && !fresh;
   const source = profile?.binding.source === "nessie" ? "Nessie API (sandbox)" : profile?.binding.source === "demo" ? "Demo fixture" : nessieConfigured ? "Nessie API not loaded" : "Demo fixture not loaded";
-  const transactions = profile?.transactions || [];
+  const transactions = (profile?.transactions || []).filter((item) => !liveRequested || item.source === "nessie");
   const visibleTransactions = transactions.filter((item) => filter === "all" || item.relatedStatus === filter);
   const suggested = transactions.filter((item) => item.relatedStatus === "suggested");
-  const rentHistory = [...record.rentHistory].sort((left, right) => {
+  const rentHistory = record.rentHistory.filter((item) => !liveRequested || item.source === "nessie").sort((left, right) => {
     const leftDate = Date.parse(left.month);
     const rightDate = Date.parse(right.month);
     if (Number.isNaN(leftDate)) return Number.isNaN(rightDate) ? 0 : 1;
@@ -54,19 +74,19 @@ export function FinancesPanel({ record, pending, onAction, onExpense, policy, ne
     return leftDate - rightDate;
   });
   const expenseTotal = record.expenses.reduce((sum, expense) => sum + expense.amountCents, 0);
-  const bankBalance = profile?.accountBalanceCents;
+  const bankBalance = unavailable ? undefined : profile?.accountBalanceCents;
   const bankSufficient = bankBalance !== undefined && bankBalance >= record.escrow.amountCents;
   const mismatch = policy?.reasonCodes?.some((code) => code === "NESSIE_ACCOUNT_MISMATCH" || code === "NESSIE_CUSTOMER_MISMATCH");
   const busy = !!pending;
   useEffect(() => setFilter("all"), [record.id]);
 
   return <section className="tab-content nessie-finances">
-    <SectionHeading eyebrow="FINANCIAL IDENTITY & BANKING CONTEXT" title="Capital One / Nessie"><Button icon={RefreshCw} busy={pending === "sync_finances"} disabled={busy || resolved} onClick={() => { void onAction({ action: "sync_finances" }); }}>{profile ? "Refresh financial profile" : "Load financial profile"}</Button></SectionHeading>
-    <div className="nessie-source-line"><span className="subtle-badge"><Landmark size={13} />{source}</span><span className={`text-status ${fresh ? "green" : unavailable ? "red" : "amber"}`}>{fresh ? <ShieldCheck size={14} /> : <AlertCircle size={14} />}{fresh ? "Binding verified" : unavailable ? "Verification unavailable" : stale ? "Verification stale" : "Verification required"}</span>{profile?.checkedAt && <span className="source-label">Last checked {shortDate(profile.checkedAt)} at {time(profile.checkedAt)}</span>}</div>
+    <SectionHeading eyebrow="FINANCIAL IDENTITY & BANKING CONTEXT" title="Capital One / Nessie"><Button icon={RefreshCw} busy={pending === "sync_finances"} disabled={busy || resolved} onClick={() => { void refreshProfile(); }}>{profile ? "Refresh financial profile" : "Load financial profile"}</Button></SectionHeading>
+    <div className="nessie-source-line"><strong data-testid="nessie-data-status" role="status">{unavailable ? "ERROR / UNAVAILABLE" : liveRequested ? fresh ? "LIVE / VERIFIED" : stale ? "LIVE / STALE" : "LIVE / CHECKING" : "DEMO"}</strong><span className="subtle-badge"><Landmark size={13} />{source}</span><span className={`text-status ${fresh ? "green" : unavailable ? "red" : "amber"}`}>{fresh ? <ShieldCheck size={14} /> : <AlertCircle size={14} />}{fresh ? liveRequested ? "Binding verified" : "Demo binding checked" : unavailable ? "Verification unavailable" : stale ? "Verification stale" : "Verification required"}</span>{profile?.checkedAt && <span className="source-label">Last checked {shortDate(profile.checkedAt)} at {time(profile.checkedAt)}</span>}</div>
 
     <div className="nessie-profile-layout">
-      <section aria-labelledby="nessie-verification-title"><h3 id="nessie-verification-title" className="nessie-section-title">Customer/account verification</h3><div className="nessie-verification-list"><VerificationRow label="Customer exists" verified={!!profile?.customerVerified} fresh={fresh} unavailable={unavailable} /><VerificationRow label="Account exists" verified={!!profile?.accountVerified} fresh={fresh} unavailable={unavailable} /><VerificationRow label="Account belongs to customer" verified={!!profile?.ownershipVerified} fresh={fresh} unavailable={unavailable} /></div><p className="nessie-context-note">{profile?.detail || "No financial profile is loaded for this case."}</p>{stale && <p className="nessie-context-note amber">The last verification has expired. Payment authorization requires a fresh server check.</p>}{profile?.reasonCode && <code className="nessie-reason-code">{profile.reasonCode}</code>}<p className="nessie-context-note">Sandbox customer/account verification. Not identity verification or real KYC.</p></section>
-      <section aria-labelledby="nessie-binding-title"><h3 id="nessie-binding-title" className="nessie-section-title">Authoritative case binding</h3>{profile ? <dl className="nessie-binding"><div><dt>RentEscrow tenant</dt><dd>{profile.binding.tenantId}</dd></div><div><dt>Case</dt><dd>{profile.binding.caseId}</dd></div><div><dt>Nessie customer</dt><dd>{profile.binding.customerId}</dd></div><div><dt>Nessie account</dt><dd>{profile.binding.accountId}</dd></div></dl> : <div className="nessie-unloaded"><ShieldCheck size={21} /><p>Binding identifiers will appear after the server loads the financial profile.</p></div>}</section>
+      <section aria-labelledby="nessie-verification-title"><h3 id="nessie-verification-title" className="nessie-section-title">Customer/account verification</h3><div className="nessie-verification-list"><VerificationRow label="RentEscrow tenant and case" verified={profile?.binding.tenantId === record.ownerId && profile?.binding.caseId === record.id} fresh={fresh} unavailable={unavailable} /><VerificationRow label="Customer exists" verified={!!profile?.customerVerified} fresh={fresh} unavailable={unavailable} /><VerificationRow label="Account exists" verified={!!profile?.accountVerified} fresh={fresh} unavailable={unavailable} /><VerificationRow label="Account belongs to customer" verified={!!profile?.ownershipVerified} fresh={fresh} unavailable={unavailable} /><VerificationRow label="Balance available" verified={profile?.accountBalanceCents !== undefined} fresh={fresh} unavailable={unavailable} /></div><p className="nessie-context-note">{requestFailed ? "The financial refresh could not complete. Retry to verify current banking data." : profile?.detail || (liveRequested ? "Loading the configured account through the server. Demo data is not used for this live check." : "No financial profile is loaded for this case.")}</p>{stale && <p className="nessie-context-note amber">The last verification has expired. Payment authorization requires a fresh server check.</p>}{profile?.reasonCode && <code className="nessie-reason-code">{profile.reasonCode}</code>}<p className="nessie-context-note">Sandbox customer/account verification. Not identity verification or real KYC.</p></section>
+      <section aria-labelledby="nessie-binding-title"><h3 id="nessie-binding-title" className="nessie-section-title">Authoritative case binding</h3>{profile ? <dl className="nessie-binding"><div><dt>RentEscrow tenant</dt><dd>{profile.binding.tenantId}</dd></div><div><dt>Case</dt><dd>{profile.binding.caseId}</dd></div><div><dt>Nessie customer</dt><dd>{profile.binding.customerId || "Not configured"}</dd></div><div><dt>Nessie account</dt><dd>{profile.binding.accountId || "Not configured"}</dd></div></dl> : <div className="nessie-unloaded"><ShieldCheck size={21} /><p>Binding identifiers will appear after the server loads the financial profile.</p></div>}</section>
     </div>
 
     <div className="finance-metrics nessie-metrics"><div><span><Landmark size={17} />Bank account balance</span><strong data-testid="nessie-bank-balance">{bankBalance === undefined ? "Unavailable" : money(bankBalance)}</strong><small>{bankBalance === undefined ? "No verified balance returned" : !fresh ? "Stale snapshot, not current authorization" : `${source} balance`}</small>{fresh && bankBalance !== undefined && <span className={`text-status ${bankSufficient ? "green" : "red"}`}>{bankSufficient ? <CheckCircle2 size={13} /> : <AlertCircle size={13} />}{bankSufficient ? "Sufficient" : "Insufficient"} for {money(record.escrow.amountCents)}</span>}</div><div><span><Wallet size={17} />Simulated escrow balance</span><strong data-testid="simulation-balance">{money(record.accountBalanceCents)}</strong><small>Separate local USD ledger</small><span className="source-label">{money(record.escrow.status === "unfunded" ? 0 : record.escrow.amountCents)} {record.escrow.status === "released" ? "released from escrow" : "held in escrow"}</span></div><div><span><FileText size={17} />Confirmed issue impact</span><strong data-testid="confirmed-issue-impact">{money(expenseTotal)}</strong><small>{record.expenses.length} recorded costs</small><span className="source-label">{suggested.length} suggested {suggested.length === 1 ? "cost excluded" : "costs excluded"}</span></div></div>
@@ -77,7 +97,7 @@ export function FinancesPanel({ record, pending, onAction, onExpense, policy, ne
       {policy && <div className={`nessie-authorization-result ${policy.approved ? "nessie-authorization-approved" : "nessie-authorization-blocked"}`} role="status" aria-live="polite" data-testid="nessie-policy-result"><div>{policy.approved ? <ShieldCheck size={23} /> : <ShieldX size={23} />}<div><h3>{policy.approved ? "Financial binding verified" : "Payment authorization blocked"}</h3><p>{policy.approved ? `The financial binding matches Case ${record.id}. Other settlement requirements still apply.` : mismatch ? `Customer/account binding does not match Case ${record.id}.` : "The server rejected this financial authorization check."}</p><strong>No settlement action initiated.</strong></div></div>{policy.reasonCodes?.length ? <div className="nessie-reason-codes">{policy.reasonCodes.map((code) => <code key={code}>{code}</code>)}</div> : null}<ul>{policy.checks.map((check) => <li key={check.key}>{check.passed ? <CheckCircle2 size={14} /> : <ShieldX size={14} />}<div><strong>{check.label}</strong><span>{check.detail}</span></div></li>)}</ul></div>}
     </section>
 
-    <section className="section-separated"><SectionHeading title="Rent-payment history"><span className="subtle-badge">{profile && !fresh ? "Historical snapshot" : record.rentHistory.some((item) => item.source === "nessie") ? "Nessie API (sandbox)" : "Demo fixture"}</span></SectionHeading>{profile && !fresh && <p className="nessie-context-note nessie-history-warning">{unavailable ? "Current banking context is unavailable. Previously recorded payments are shown below." : "Verification is not current. These payment records are a historical snapshot."}</p>}{rentHistory.length ? <div className="table-scroll"><table><thead><tr><th scope="col">Period</th><th scope="col">Payment</th><th scope="col">Source</th><th scope="col" className="align-right">Amount</th></tr></thead><tbody>{rentHistory.map((payment) => <tr key={payment.id}><td><span className="table-icon"><CalendarDays size={15} />{payment.month}</span></td><td><span className={`text-status ${payment.status === "paid" ? "green" : "amber"}`}>{payment.status === "paid" ? <CheckCircle2 size={14} /> : <Clock3 size={14} />}{payment.status === "paid" ? "Paid" : "Due"}</span></td><td className="muted">{payment.source === "demo" ? "Demo fixture" : "Nessie API"}</td><td className="align-right strong">{money(payment.amountCents)}</td></tr>)}</tbody></table></div> : <EmptyState icon={Landmark} title="No rent-payment records">{unavailable ? "The banking provider is unavailable." : "No rent-payment history has been loaded for this case."}</EmptyState>}</section>
+    <section className="section-separated"><SectionHeading title="Rent-payment history"><span className="subtle-badge">{profile && !fresh ? "Historical snapshot" : liveRequested ? "Nessie API (sandbox)" : "Demo fixture"}</span></SectionHeading>{profile && !fresh && <p className="nessie-context-note nessie-history-warning">{unavailable ? "Current banking context is unavailable. Previously recorded payments are shown below." : "Verification is not current. These payment records are a historical snapshot."}</p>}{rentHistory.length ? <div className="table-scroll"><table><thead><tr><th scope="col">Period</th><th scope="col">Payment</th><th scope="col">Source</th><th scope="col" className="align-right">Amount</th></tr></thead><tbody>{rentHistory.map((payment) => <tr key={payment.id}><td><span className="table-icon"><CalendarDays size={15} />{payment.month}</span></td><td><span className={`text-status ${payment.status === "paid" ? "green" : "amber"}`}>{payment.status === "paid" ? <CheckCircle2 size={14} /> : <Clock3 size={14} />}{payment.status === "paid" ? "Paid" : "Due"}</span></td><td className="muted">{payment.source === "demo" ? "Demo fixture" : "Nessie API"}</td><td className="align-right strong">{money(payment.amountCents)}</td></tr>)}</tbody></table></div> : <EmptyState icon={Landmark} title="No rent-payment records">{unavailable ? "The banking provider is unavailable." : "No rent-payment history has been loaded for this case."}</EmptyState>}</section>
 
     <section className="section-separated" aria-label="Account transactions">
       <SectionHeading title="Account transactions"><span className="subtle-badge">{transactions.length} transactions</span></SectionHeading>

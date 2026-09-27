@@ -19,8 +19,8 @@ import {
   type XrplReceipt,
 } from "@/lib/integrations/xrpl-settlement";
 import { evaluateFinancialBinding, evaluatePolicy, evaluateXrplPolicy, makeIntent, makeXrplIntent } from "@/lib/policy";
-import { demoFinancialProfile } from "@/lib/financial-fixture";
 import { NessieError, resolveFinancialBinding } from "@/lib/integrations/nessie";
+import { failedFinancialProfile, nessiePolicyContext } from "./nessie-verification";
 import {
   getPhotonConfig,
   isPhotonCaseBound,
@@ -543,13 +543,10 @@ async function refreshFinancialProfile(caseRecord: CaseRecord): Promise<void> {
     caseRecord.expenses = caseRecord.expenses.filter((item) => item.source !== "nessie" || !!item.transactionId);
   } catch (error) {
     if (!(error instanceof NessieError)) throw error;
-    let binding = previous?.binding ?? demoFinancialProfile(caseRecord.ownerId, caseRecord.id).binding;
-    try { binding = resolveFinancialBinding(caseRecord); } catch { /* Retain the rejected binding for inspection. */ }
-    caseRecord.financialProfile = {
-      binding, status: ["NESSIE_NOT_CONFIGURED", "NESSIE_API_UNAVAILABLE"].includes(error.reasonCode) ? "unavailable" : "rejected",
-      reasonCode: error.reasonCode, detail: error.message, checkedAt: new Date().toISOString(),
-      customerVerified: false, accountVerified: false, ownershipVerified: false, transactions: previous?.transactions ?? [],
-    };
+    caseRecord.financialProfile = failedFinancialProfile(caseRecord, error);
+  }
+  if (caseRecord.financialProfile?.binding.source === "nessie") {
+    caseRecord.financialPolicyContext = nessiePolicyContext(caseRecord);
   }
 }
 
@@ -770,6 +767,8 @@ async function applyAction(
       // Refresh trusted customer/account ownership at the last server boundary before policy and signing.
       // The adapter rechecks the resulting immutable snapshot immediately before it signs.
       await refreshFinancialProfile(caseRecord);
+      // Autonomous settlement requires live financial verification, even in an otherwise explicit demo workspace.
+      if (settlementActor === "settlement_agent") caseRecord.financialPolicyContext = nessiePolicyContext(caseRecord);
     }
     return withXrplWalletLock(settlement.source, async () => {
       const journal = await readXrplJournal(settlement);

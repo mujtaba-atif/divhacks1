@@ -16,7 +16,7 @@ function fixtureProfile(record: CaseRecord): FinancialProfile {
   };
 }
 
-async function mockWorkspace(page: Page, initialRecord: CaseRecord) {
+async function mockWorkspace(page: Page, initialRecord: CaseRecord, live = false, failRefresh = false) {
   const record = structuredClone(initialRecord);
   const actions: CaseAction[] = [];
   const pageErrors: string[] = [];
@@ -30,13 +30,24 @@ async function mockWorkspace(page: Page, initialRecord: CaseRecord) {
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/dashboard" && route.request().method() === "GET") {
-      return route.fulfill({ json: { cases: [record], integrations: [{ id: "nessie", name: "Capital One / Nessie", status: "demo", detail: "Intercepted browser fixture" }], mode: "demo" } });
+      return route.fulfill({ json: { cases: [record], integrations: [{ id: "nessie", name: "Capital One / Nessie", status: live ? "configured" : "demo", detail: "Intercepted browser fixture" }], mode: "demo" } });
     }
     if (url.pathname === `/api/cases/${record.id}/actions` && route.request().method() === "POST") {
       const action = route.request().postDataJSON() as CaseAction;
       actions.push(action);
       let policy: PolicyResult | undefined;
-      if (action.action === "sync_finances") record.financialProfile = fixtureProfile(record);
+      if (action.action === "sync_finances") {
+        if (failRefresh) return route.fulfill({ status: 503, json: { error: "Financial service unavailable" } });
+        if (record.financialProfile?.status !== "unavailable") record.financialProfile = fixtureProfile(record);
+        if (live) {
+          record.financialProfile!.binding.source = "nessie";
+          record.financialProfile!.binding.customerId = "live_customer";
+          record.financialProfile!.binding.accountId = "live_account";
+          record.financialProfile!.accountBalanceCents = 987650;
+          record.financialProfile!.transactions.forEach((item) => { item.source = "nessie"; });
+          record.rentHistory.forEach((item) => { item.source = "nessie"; });
+        }
+      }
       else if (action.action === "confirm_transaction" || action.action === "dismiss_transaction") {
         const transaction = record.financialProfile?.transactions.find((item) => item.id === action.transactionId);
         if (!transaction) return route.fulfill({ status: 404, json: { error: "Transaction not found" } });
@@ -67,7 +78,8 @@ test("mocked Nessie profile requires confirmation and blocks substitution withou
   await expect(page.getByRole("heading", { name: "Capital One / Nessie", exact: true })).toBeVisible();
   await expect(page.getByText("Verification required", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Load financial profile", exact: true }).click();
-  await expect(page.getByText("Binding verified", { exact: true })).toBeVisible();
+  await expect(page.getByText("Demo binding checked", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("nessie-data-status")).toHaveText("DEMO");
   await expect(page.locator(".nessie-binding")).toContainText("customer_123");
   await expect(page.locator(".nessie-binding")).toContainText("account_456");
   await expect(page.getByTestId("nessie-bank-balance")).toHaveText("$2,430");
@@ -121,6 +133,8 @@ test("mocked unavailable banking clears current balance and labels historical re
   const record = createDemoCase("tenant_1042");
   record.financialProfile = { ...fixtureProfile(record), status: "unavailable", reasonCode: "NESSIE_API_UNAVAILABLE", detail: "The banking provider is unavailable. Existing records are retained for inspection.", customerVerified: false, accountVerified: false, ownershipVerified: false, accountBalanceCents: undefined };
   record.financialProfile.binding.source = "nessie";
+  record.financialProfile.transactions.forEach((item) => { item.source = "nessie"; });
+  record.rentHistory.forEach((item) => { item.source = "nessie"; });
   const mock = await mockWorkspace(page, record);
   await page.goto("/");
   await page.getByRole("tab", { name: "Finances", exact: true }).click();
@@ -131,7 +145,7 @@ test("mocked unavailable banking clears current balance and labels historical re
   await expect(page.getByRole("button", { name: "Confirm Space heater as issue-related", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Dismiss Space heater", exact: true })).toBeDisabled();
   await expect(page.getByText("Binding verified", { exact: true })).toHaveCount(0);
-  expect(mock.actions).toEqual([]);
+  expect(mock.actions).toEqual([{ action: "sync_finances" }]);
   expect(mock.pageErrors).toEqual([]);
 });
 
@@ -187,5 +201,50 @@ test("mocked corrected and missing transactions retain explicit confirmed expens
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.getByRole("region", { name: "Account transactions", exact: true }).screenshot({ path: "test-results/nessie-provider-snapshot.png" });
   expect(mock.actions).toEqual([]);
+  expect(mock.pageErrors).toEqual([]);
+});
+
+
+test("configured Nessie automatically replaces seeded fixtures with live server data", async ({ page }) => {
+  const initial = createDemoCase("tenant_1042");
+  const mock = await mockWorkspace(page, initial, true);
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Finances", exact: true }).click();
+  await expect(page.getByTestId("nessie-data-status")).toHaveText("LIVE / VERIFIED");
+  await expect(page.getByTestId("nessie-bank-balance")).toHaveText("$9,876.50");
+  await expect(page.locator(".nessie-binding")).toContainText("live_customer");
+  await expect(page.locator(".nessie-binding")).toContainText("live_account");
+  expect(mock.actions).toEqual([{ action: "sync_finances" }]);
+  await expect(page.locator(".nessie-finances table").first()).not.toContainText("Demo fixture");
+  await expect(page.getByTestId("confirmed-issue-impact")).toHaveText("$0");
+  expect(mock.pageErrors).toEqual([]);
+});
+
+test("live refresh transport failure never displays the seeded demo balance or identity", async ({ page }) => {
+  const mock = await mockWorkspace(page, createDemoCase("tenant_1042"), true, true);
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Finances", exact: true }).click();
+  await expect(page.getByTestId("nessie-data-status")).toHaveText("ERROR / UNAVAILABLE");
+  await expect(page.getByTestId("nessie-bank-balance")).toHaveText("Unavailable");
+  await expect(page.locator(".nessie-binding")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "No rent-payment records" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "No account transactions" })).toBeVisible();
+  expect(mock.actions).toEqual([{ action: "sync_finances" }]);
+  expect(mock.pageErrors).toEqual([]);
+});
+
+test("a fresh cached live profile is rechecked and cannot stay verified after server failure", async ({ page }) => {
+  const record = createDemoCase("tenant_1042");
+  record.financialProfile = fixtureProfile(record);
+  record.financialProfile.binding.source = "nessie";
+  record.financialProfile.transactions.forEach((item) => { item.source = "nessie"; });
+  // Config is now disabled; the persisted profile is still inside its original TTL.
+  const mock = await mockWorkspace(page, record, false, true);
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Finances", exact: true }).click();
+  await expect(page.getByTestId("nessie-data-status")).toHaveText("ERROR / UNAVAILABLE");
+  await expect(page.getByTestId("nessie-bank-balance")).toHaveText("Unavailable");
+  await expect(page.getByText("Binding verified", { exact: true })).toHaveCount(0);
+  expect(mock.actions).toEqual([{ action: "sync_finances" }]);
   expect(mock.pageErrors).toEqual([]);
 });
