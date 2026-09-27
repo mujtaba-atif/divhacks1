@@ -9,6 +9,8 @@ export interface AuthUser {
   role: "tenant" | "landlord";
   displayName: string;
   workspaceOwnerId: string;
+  /** Safe account projection; the full contact is stored only on the server. */
+  maskedPhone?: string;
 }
 
 export interface RepairAction {
@@ -35,7 +37,8 @@ export interface LandlordCase {
   property: { id: string; address: string; borough: string; apartment: string };
   tenant: { displayName: string };
   evidence: EvidenceRecord[];
-  messages: Pick<CaseMessage, "id" | "sender" | "body" | "createdAt" | "delivery">[];
+  messages: Pick<CaseMessage, "id" | "sender" | "body" | "createdAt" | "delivery" | "originatingAgent"
+    | "interpretation" | "provider" | "failureReason">[];
   timeline: TimelineEvent[];
   repairReported: boolean;
   repairs: RepairAction[];
@@ -153,6 +156,50 @@ export interface LandlordReplyClassification {
   source: "demo" | "rules" | "gemini";
 }
 
+export type MessagingRole = "tenant" | "landlord";
+export type MessagingIntent = "scheduled" | "rescheduled" | "repair_complete" | "repair_update" | "question"
+  | "refusal" | "other" | "reschedule_request" | "schedule_confirmed" | "no_show" | "unresolved";
+
+export interface ParticipantMessageInterpretation {
+  intent: MessagingIntent;
+  summary: string;
+  scheduledFor?: string;
+  source: "rules" | "gemini";
+}
+
+export interface CaseMessagingBindingParticipant {
+  userId: string;
+  phone: string;
+  conversationId?: string;
+  sendingLine?: string;
+}
+
+export interface CaseMessagingBinding {
+  ownerId: string;
+  caseId: string;
+  tenant: CaseMessagingBindingParticipant;
+  landlord: CaseMessagingBindingParticipant;
+}
+
+export interface CaseMessagingEvent {
+  id: string;
+  type: "MAINTENANCE_SCHEDULED" | "MAINTENANCE_RESCHEDULED" | "REPAIR_REPORTED_COMPLETE"
+    | "REPAIR_UPDATE" | "RESCHEDULE_REQUESTED" | "SCHEDULE_CONFIRMED" | "MAINTENANCE_NO_SHOW"
+    | "CONDITION_UNRESOLVED";
+  actor: MessagingRole;
+  messageId: string;
+  createdAt: string;
+  summary: string;
+  scheduledFor?: string;
+}
+
+export interface MaintenanceSchedule {
+  scheduledFor: string;
+  status: "scheduled" | "reschedule_requested" | "confirmed" | "no_show";
+  updatedAt: string;
+  sourceMessageId: string;
+}
+
 export interface CaseMessage {
   id: string;
   sender: "tenant" | "agent" | "landlord";
@@ -170,6 +217,14 @@ export interface CaseMessage {
   sentAt?: string;
   failureReason?: string;
   classification?: LandlordReplyClassification;
+  originatingAgent?: MessagingRole;
+  participantUserId?: string;
+  recipientUserId?: string;
+  triggerMessageId?: string;
+  interpretation?: ParticipantMessageInterpretation;
+  /** Inbound processing is separate from receipt persistence and relay delivery. */
+  processedAt?: string;
+  relayRequired?: boolean;
 }
 
 export interface TimelineEvent {
@@ -278,6 +333,8 @@ export interface AuditRecord {
   code?: string;
   signed?: boolean;
   submitted?: boolean;
+  policyDecision?: PolicyResult;
+  actor?: "tenant" | "settlement_agent";
 }
 
 /** Public authorization and receipt only. Never store signing keys here. */
@@ -285,6 +342,12 @@ export interface XrplSettlement {
   id: string;
   caseId: string;
   ownerId: string;
+  /** Pinned participant identities; optional only for reading historical receipts. */
+  tenantUserId?: string;
+  landlordUserId?: string;
+  landlordWallet?: string;
+  agentAuthorizedAt?: string;
+  agentRequestedAt?: string;
   escrowId: string;
   network: "testnet";
   transactionType: "Payment";
@@ -316,6 +379,9 @@ export interface XrplSettlementIntent {
   destination: string;
   amountDrops: string;
   amountUsdCents: number;
+  tenantUserId?: string;
+  landlordUserId?: string;
+  landlordWallet?: string;
 }
 
 /** Optional trusted normalized context; no dependency on a banking provider. */
@@ -359,6 +425,8 @@ export interface CaseRecord {
   tenantPhone?: string;
   /** Assigned only by server-side demo creation, never accepted from an API caller. */
   demoMessagingBinding?: { ownerId: string; caseId: string; recipient: string };
+  /** Trusted server-side participant routing authority for two-sided messaging. */
+  messagingBinding?: CaseMessagingBinding;
   title: string;
   issue: IssueType;
   description: string;
@@ -381,6 +449,8 @@ export interface CaseRecord {
   rentHistory: RentPayment[];
   escrow: EscrowRecord;
   repairReported: boolean;
+  messagingEvents?: CaseMessagingEvent[];
+  maintenanceSchedule?: MaintenanceSchedule;
   tenantConfirmed: boolean;
   /** Omitted for pre-registration demo cases; bilateral is the legacy behavior. */
   case_type?: CaseType;
@@ -425,6 +495,7 @@ export type CaseAction =
   | { action: "confirm_resolution" }
   | { action: "release_escrow" }
   | { action: "enable_xrpl" }
+  | { action: "authorize_xrpl_agent" }
   | { action: "settle_xrpl" }
   | { action: "reconcile_xrpl" }
   | { action: "xrpl_security_demo"; scenario: XrplSecurityScenario }

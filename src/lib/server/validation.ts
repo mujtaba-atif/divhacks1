@@ -50,6 +50,7 @@ export const actionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("confirm_resolution") }).strict(),
   z.object({ action: z.literal("release_escrow") }).strict(),
   z.object({ action: z.literal("enable_xrpl") }).strict(),
+  z.object({ action: z.literal("authorize_xrpl_agent") }).strict(),
   z.object({ action: z.literal("settle_xrpl") }).strict(),
   z.object({ action: z.literal("reconcile_xrpl") }).strict(),
   z.object({ action: z.literal("xrpl_security_demo"), scenario: z.enum([

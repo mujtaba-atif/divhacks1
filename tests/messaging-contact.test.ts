@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { normalizeMessagingContact } from "../src/lib/messaging-contact";
+import { maskMessagingContact, normalizeMessagingContact } from "../src/lib/messaging-contact";
 import { createDemoCase } from "../src/lib/seed";
 
 test("landlord phone formats normalize to the same E.164 recipient", () => {
@@ -14,11 +14,18 @@ test("landlord phone formats normalize to the same E.164 recipient", () => {
   }
 });
 
-test("RE-1042 has Mujtaba as tenant and Rayyan as landlord, without changing workspace ownership", () => {
+test("RE-1042 has Rayaan as tenant and Alex as landlord, without changing workspace ownership", () => {
   const record = createDemoCase("opaque-owner-id");
   assert.equal(record.ownerId, "opaque-owner-id");
-  assert.deepEqual(record.tenant, { name: "Mujtaba Atif", phone: "+12018567033" });
-  assert.equal(record.landlordName, "Rayyan Khan");
-  assert.equal(record.landlordContact, "+19736060558");
+  assert.deepEqual(record.tenant, { name: "Rayaan", phone: "+19736060558" });
+  assert.equal(record.landlordName, "Alex Morgan");
+  assert.equal(record.landlordContact, "+12018567033");
   assert.notEqual(record.landlordContact, record.tenant.phone);
+});
+
+test("contact labels expose only the configured destination's last four digits", () => {
+  assert.equal(maskMessagingContact("+19736060558"), "+1 (***) ***-0558");
+  assert.equal(maskMessagingContact("201-856-7033"), "+1 (***) ***-7033");
+  assert.equal(maskMessagingContact("manager@example.com"), "m***@example.com");
+  assert.equal(maskMessagingContact(undefined), "Contact not configured");
 });

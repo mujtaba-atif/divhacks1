@@ -43,16 +43,16 @@ async function verifiedCase(request: APIRequestContext, playwright: { request: A
   return successfulAction(request, initial.id, { action: "verify_repair" });
 }
 
-test("demo creation and reset keep Mujtaba as tenant and Rayyan as the message recipient", async ({ request }) => {
+test("demo creation and reset keep Rayaan as tenant and Alex as the message recipient", async ({ request }) => {
   const initial = (await dashboard(request)).cases[0] as CaseRecord;
   const resetResponse = await request.post("/api/demo/reset", { headers: { Origin: origin } });
   expect(resetResponse.ok()).toBeTruthy();
   const reset = (await resetResponse.json()).cases[0] as CaseRecord;
   for (const record of [initial, reset]) {
     expect(record.id).toBe("RE-1042");
-    expect(record.tenant).toEqual({ name: "Mujtaba Atif", phone: "+12018567033" });
-    expect(record.landlordName).toBe("Rayyan Khan");
-    expect(record.landlordContact).toBe("+19736060558");
+    expect(record.tenant).toEqual({ name: "Rayaan", phone: "+19736060558" });
+    expect(record.landlordName).toBe("Alex Morgan");
+    expect(record.landlordContact).toBe("+12018567033");
   }
   expect(reset.ownerId).toBe(initial.ownerId);
 });

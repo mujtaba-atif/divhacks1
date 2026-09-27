@@ -10,3 +10,11 @@ export function normalizeMessagingContact(value: string | undefined): string | u
     : /^1\d{10}$/.test(digits) ? `+${digits}` : undefined;
   return international && /^\+[1-9]\d{7,14}$/.test(international) ? international : undefined;
 }
+
+/** Public contact label; full destinations remain server-managed. */
+export function maskMessagingContact(value: string | undefined): string {
+  const contact = normalizeMessagingContact(value);
+  if (!contact) return "Contact not configured";
+  if (contact.includes("@")) return `${contact[0]}***@${contact.split("@")[1]}`;
+  return `${contact.startsWith("+1") && contact.length === 12 ? "+1" : "+"} (***) ***-${contact.slice(-4)}`;
+}

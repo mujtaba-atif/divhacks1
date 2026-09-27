@@ -20,7 +20,8 @@
     "photon:bind": "node --conditions=react-server --import tsx scripts/bind-photon-case.ts",
     "test": "node --conditions=react-server --import tsx --test tests/*.test.ts",
     "test:e2e": "playwright test",
-    "xrpl:setup-testnet": "node --conditions=react-server --import tsx scripts/xrpl-setup-testnet.ts"
+    "xrpl:setup-testnet": "node --conditions=react-server --import tsx scripts/xrpl-setup-testnet.ts",
+    "xrpl:prepare-demo": "node --env-file=.env.local --conditions=react-server --import tsx scripts/xrpl-prepare-demo.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

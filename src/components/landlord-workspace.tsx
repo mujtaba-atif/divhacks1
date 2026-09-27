@@ -1,16 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { Building2, CalendarClock, CheckCircle2, ChevronRight, CircleHelp, FileImage, FileText, Hammer, LayoutDashboard, LoaderCircle, LogOut, Menu, MessageSquare, Send, ShieldCheck, Upload, UsersRound, Wrench, X } from "lucide-react";
-import type { AuthUser, EvidenceRecord, LandlordCase } from "@/lib/types";
+import { BellRing, Building2, CalendarClock, CheckCircle2, ChevronRight, CircleHelp, FileImage, FileText, Hammer, LayoutDashboard, LoaderCircle, LogOut, Menu, MessageSquare, ShieldCheck, Upload, UsersRound, Wrench, X } from "lucide-react";
+import type { AuthUser, EvidenceRecord, IntegrationStatus, LandlordCase } from "@/lib/types";
 import { BuildingHistoryDialog, BuildingHistorySummary, type BuildingContextState, useCaseBuildingContext } from "./building-history";
+import { messageDeliveryLabel, messageRoleLabel, photonModeLabel } from "./case-panels";
+import { LandlordOperations } from "./landlord-operations";
 import { Button, EmptyState, fullDate, Modal, money, StatusBadge, time } from "./workspace-ui";
 import { announceSessionChange, redirectIfSignedOut, useSessionGuard } from "./use-session-guard";
 
-type LandlordTab = "cases" | "messages" | "repairs" | "property";
+type LandlordTab = "operations" | "cases" | "messages" | "repairs" | "property";
 type PendingAction = "load" | "logout" | "message" | "schedule" | "report_complete" | "evidence" | null;
 
 const landlordTabs = [
+  { id: "operations" as const, label: "Operations", icon: BellRing },
   { id: "cases" as const, label: "Open cases", icon: LayoutDashboard },
   { id: "messages" as const, label: "Messages", icon: MessageSquare },
   { id: "repairs" as const, label: "Repairs", icon: Hammer },
@@ -39,23 +42,33 @@ export default function LandlordWorkspace({ user }: { user: AuthUser }) {
   useSessionGuard(user);
   const [cases, setCases] = useState<LandlordCase[]>([]);
   const [activeId, setActiveId] = useState("");
-  const [tab, setTab] = useState<LandlordTab>("cases");
+  const [tab, setTab] = useState<LandlordTab>("operations");
   const [pending, setPending] = useState<PendingAction>("load");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [mobileNav, setMobileNav] = useState(false);
   const [preview, setPreview] = useState<EvidenceRecord | null>(null);
   const [buildingOpen, setBuildingOpen] = useState(false);
+  const [messagingIntegration, setMessagingIntegration] = useState<IntegrationStatus>();
   const mutationBusy = useRef(false);
+  const mutationVersion = useRef(0);
   const activeCase = cases.find((record) => record.id === activeId) ?? cases[0];
   const buildingContext = useCaseBuildingContext(activeCase?.id, "landlord");
+
+  const reviewOperationCase = useCallback((caseId: string) => {
+    setActiveId(caseId);
+    setTab("cases");
+    setError("");
+    setNotice("");
+  }, []);
 
   const loadCases = useCallback(async () => {
     setPending("load");
     setError("");
     try {
-      const result = await request<{ cases: LandlordCase[]; user: AuthUser }>("/api/landlord/cases");
+      const result = await request<{ cases: LandlordCase[]; user: AuthUser; integration?: IntegrationStatus }>("/api/landlord/cases");
       setCases(result.cases);
+      setMessagingIntegration(result.integration);
       setActiveId((current) => result.cases.some((record) => record.id === current) ? current : result.cases[0]?.id ?? "");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The property workspace could not load.");
@@ -65,6 +78,29 @@ export default function LandlordWorkspace({ user }: { user: AuthUser }) {
   }, []);
 
   useEffect(() => { void loadCases(); }, [loadCases]);
+  useEffect(() => {
+    if (pending || tab !== "messages") return;
+    let cancelled = false;
+    let refreshing = false;
+    async function refreshCases() {
+      if (document.visibilityState !== "visible" || mutationBusy.current || refreshing) return;
+      const version = mutationVersion.current;
+      refreshing = true;
+      try {
+        const result = await request<{ cases: LandlordCase[]; integration?: IntegrationStatus }>("/api/landlord/cases");
+        if (!cancelled && !mutationBusy.current && version === mutationVersion.current) {
+          setCases(result.cases);
+          setMessagingIntegration(result.integration);
+          setActiveId((current) => result.cases.some((record) => record.id === current) ? current : result.cases[0]?.id ?? "");
+        }
+      } catch { /* Keep the current thread and draft available during a refresh outage. */ }
+      finally { refreshing = false; }
+    }
+    const timer = window.setInterval(() => { void refreshCases(); }, 5_000);
+    const onVisibilityChange = () => { void refreshCases(); };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => { cancelled = true; window.clearInterval(timer); document.removeEventListener("visibilitychange", onVisibilityChange); };
+  }, [pending, tab]);
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(""), 6000); return () => window.clearTimeout(timer); }, [notice]);
   useEffect(() => { if (!mobileNav) return; const close = (event: KeyboardEvent) => { if (event.key === "Escape") setMobileNav(false); }; window.addEventListener("keydown", close); return () => window.removeEventListener("keydown", close); }, [mobileNav]);
 
@@ -81,6 +117,7 @@ export default function LandlordWorkspace({ user }: { user: AuthUser }) {
   async function runAction(action: { action: "message"; body: string } | { action: "schedule"; scheduledFor: string; notes: string } | { action: "report_complete"; notes: string }, pendingAction: Exclude<PendingAction, "load" | "logout" | "evidence" | null>) {
     if (!activeCase || mutationBusy.current) return false;
     mutationBusy.current = true;
+    mutationVersion.current += 1;
     setPending(pendingAction);
     setError("");
     setNotice("");
@@ -105,6 +142,7 @@ export default function LandlordWorkspace({ user }: { user: AuthUser }) {
   async function uploadEvidence(form: FormData) {
     if (!activeCase || mutationBusy.current) return false;
     mutationBusy.current = true;
+    mutationVersion.current += 1;
     setPending("evidence");
     setError("");
     setNotice("");
@@ -141,31 +179,32 @@ export default function LandlordWorkspace({ user }: { user: AuthUser }) {
   }
 
   return <div className="workspace-shell landlord-shell">
-    <a href="#landlord-main" className="skip-link">Skip to property cases</a>
+    <a href="#landlord-main" className="skip-link">Skip to property operations</a>
     {mobileNav && <button className="nav-backdrop" aria-label="Close navigation" onClick={() => setMobileNav(false)} />}
     <aside className={`sidebar landlord-sidebar ${mobileNav ? "sidebar-open" : ""}`} aria-label="Property manager navigation">
       <a className="brand" href="/" aria-label="RentEscrow NYC home"><span className="brand-mark"><Building2 size={23} /><span /></span><span>RentEscrow<span className="brand-city">NYC</span></span></a>
       <div className="workspace-switch"><div className="workspace-symbol"><Building2 size={18} /></div><div><strong>Property workspace</strong><span>Manager account</span></div><ShieldCheck size={16} /></div>
       <div className="nav-label">WORKSPACE</div>
-      <nav className="main-nav">{landlordTabs.slice(0, 3).map(({ id, label, icon: Icon }) => <button key={id} className={tab === id ? "active" : ""} onClick={() => navigate(id)}><Icon size={18} /><span>{label}</span>{id === "cases" && <span className="nav-count">{cases.length}</span>}</button>)}</nav>
+      <nav className="main-nav">{landlordTabs.filter(({ id }) => id !== "property").map(({ id, label, icon: Icon }) => <button key={id} className={tab === id ? "active" : ""} onClick={() => navigate(id)}><Icon size={18} /><span>{label}</span>{id === "cases" && <span className="nav-count">{cases.length}</span>}</button>)}</nav>
       <div className="sidebar-divider" />
       <div className="nav-label">PROPERTIES</div>
       <nav className="main-nav"><button className={tab === "property" ? "active" : ""} onClick={() => navigate("property")}><Building2 size={18} /><span>{activeCase?.property.address ?? "123 Example Street"}</span></button></nav>
       <div className="sidebar-bottom">
         <div className="manager-note"><ShieldCheck size={16} /><div><strong>Privacy-aware view</strong><p>Only case details and high-level settlement status are shown.</p></div></div>
-        <div className="tenant-profile"><span className="tenant-avatar">{initials(user.displayName)}</span><div><strong>{user.displayName}</strong><span>Property manager</span></div><button className="icon-button" aria-label="Sign out" title="Sign out" onClick={() => void logout()} disabled={pending === "logout"}>{pending === "logout" ? <LoaderCircle className="spin" size={17} /> : <LogOut size={17} />}</button></div>
+        <div className="tenant-profile"><span className="tenant-avatar">{initials(user.displayName)}</span><div><strong>{user.displayName}</strong><span>Property manager</span>{user.maskedPhone && <span>{user.maskedPhone}</span>}</div><button className="icon-button" aria-label="Sign out" title="Sign out" onClick={() => void logout()} disabled={pending === "logout"}>{pending === "logout" ? <LoaderCircle className="spin" size={17} /> : <LogOut size={17} />}</button></div>
       </div>
     </aside>
 
     <div className="workspace-body">
       <header className="topbar"><div className="topbar-left"><button className="icon-button mobile-menu" aria-label="Open workspace navigation" aria-expanded={mobileNav} onClick={() => setMobileNav(true)}><Menu size={21} /></button><a className="mobile-brand" href="/">RentEscrow <span>NYC</span></a><span>Property workspace</span><ChevronRight size={14} /><strong>{landlordTabs.find((item) => item.id === tab)?.label}</strong></div><div className="topbar-right"><span className="header-identity"><span>{user.displayName}</span><small>{user.email}</small></span><span className="topbar-avatar">{initials(user.displayName)}</span><button className="button button-secondary header-logout" onClick={() => void logout()} disabled={pending === "logout"}>{pending === "logout" ? <LoaderCircle className="spin" size={15} /> : <LogOut size={15} />}<span>Sign out</span></button></div></header>
       <main id="landlord-main" className="main-content landlord-main">
-        {pending === "load" ? <div className="workspace-loading" role="status"><LoaderCircle className="spin" size={27} /><h1>Opening the property workspace</h1><p>Loading assigned cases and repair records.</p></div> : error && cases.length === 0 ? <div className="workspace-loading"><EmptyState icon={CircleHelp} title="The workspace could not load" action={<Button icon={LoaderCircle} onClick={() => void loadCases()}>Try again</Button>}>{error}</EmptyState></div> : cases.length === 0 ? <EmptyState icon={FileText} title="No assigned cases">Cases for your managed properties will appear here when a tenant opens one.</EmptyState> : <>
-          <header className="landlord-page-heading"><div><span className="eyebrow">PROPERTY MANAGER</span><h1>{tab === "cases" ? "Assigned repair cases" : tab === "messages" ? "Tenant messages" : tab === "repairs" ? "Repair coordination" : "Managed property"}</h1><p>{tab === "cases" ? "Review tenant reports and keep each repair moving." : tab === "messages" ? "Keep case communication in one accountable thread." : tab === "repairs" ? "Schedule work, document repairs, and report completion." : "Cases assigned to your property portfolio."}</p></div>{activeCase && <label className="landlord-case-select"><span>Current case</span><select value={activeCase.id} onChange={(event) => { setActiveId(event.target.value); setError(""); setNotice(""); }}>{cases.map((record) => <option key={record.id} value={record.id}>{record.id} · {record.title}</option>)}</select></label>}</header>
+        {pending === "load" ? <div className="workspace-loading" role="status"><LoaderCircle className="spin" size={27} /><h1>Opening the property workspace</h1><p>Loading assigned cases and repair records.</p></div> : error && cases.length === 0 && tab !== "operations" ? <div className="workspace-loading"><EmptyState icon={CircleHelp} title="The workspace could not load" action={<Button icon={LoaderCircle} onClick={() => void loadCases()}>Try again</Button>}>{error}</EmptyState></div> : cases.length === 0 && tab !== "operations" ? <EmptyState icon={FileText} title="No assigned cases">Cases for your managed properties will appear here when a tenant opens one.</EmptyState> : <>
+          <header className="landlord-page-heading"><div><span className="eyebrow">PROPERTY MANAGER</span><h1>{tab === "operations" ? "Operations overview" : tab === "cases" ? "Assigned repair cases" : tab === "messages" ? "Tenant messages" : tab === "repairs" ? "Repair coordination" : "Managed property"}</h1><p>{tab === "operations" ? "See what needs your decision while RentEscrow handles routine coordination." : tab === "cases" ? "Review tenant reports and keep each repair moving." : tab === "messages" ? "Keep case communication in one accountable thread." : tab === "repairs" ? "Schedule work, document repairs, and report completion." : "Cases assigned to your property portfolio."}</p></div>{tab !== "operations" && activeCase && <label className="landlord-case-select"><span>Current case</span><select value={activeCase.id} onChange={(event) => { setActiveId(event.target.value); setError(""); setNotice(""); }}>{cases.map((record) => <option key={record.id} value={record.id}>{record.id} · {record.title}</option>)}</select></label>}</header>
           {error && <div className="error-banner" role="alert"><CircleHelp size={18} /><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError("")}><X size={16} /></button></div>}
           {notice && <div className="landlord-notice" role="status"><CheckCircle2 size={18} /><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={16} /></button></div>}
+          {tab === "operations" && <LandlordOperations fallbackCases={cases} onReviewCase={reviewOperationCase} />}
           {tab === "cases" && <CasesView cases={cases} activeCase={activeCase} onSelect={(id) => { setActiveId(id); setNotice(""); }} onNavigate={navigate} onPreview={setPreview} buildingContext={buildingContext} onBuilding={() => setBuildingOpen(true)} />}
-          {tab === "messages" && activeCase && <MessagesView key={activeCase.id} record={activeCase} pending={pending === "message"} onSend={(body) => runAction({ action: "message", body }, "message")} />}
+          {tab === "messages" && activeCase && <MessagesView key={activeCase.id} record={activeCase} landlordName={user.displayName} integration={messagingIntegration} pending={pending === "message"} onSend={(body) => runAction({ action: "message", body }, "message")} />}
           {tab === "repairs" && activeCase && <RepairsView key={activeCase.id} record={activeCase} pending={pending} error={error} onSchedule={(scheduledFor, notes) => runAction({ action: "schedule", scheduledFor, notes }, "schedule")} onComplete={(notes) => runAction({ action: "report_complete", notes }, "report_complete")} onUpload={uploadEvidence} onPreview={setPreview} />}
           {tab === "property" && activeCase && <PropertyView cases={cases} record={activeCase} onSelect={(id) => { setActiveId(id); setTab("cases"); }} buildingContext={buildingContext} onBuilding={() => setBuildingOpen(true)} />}
         </>}
@@ -208,7 +247,7 @@ function CaseReview({ record, onNavigate, onPreview, buildingContext, onBuilding
   </article>;
 }
 
-function MessagesView({ record, pending, onSend }: { record: LandlordCase; pending: boolean; onSend: (body: string) => Promise<boolean> }) {
+function MessagesView({ record, landlordName, integration, pending, onSend }: { record: LandlordCase; landlordName: string; integration: IntegrationStatus | undefined; pending: boolean; onSend: (body: string) => Promise<boolean> }) {
   const [body, setBody] = useState("");
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -217,9 +256,22 @@ function MessagesView({ record, pending, onSend }: { record: LandlordCase; pendi
     if (await onSend(message)) setBody("");
   }
   return <div className="landlord-message-layout">
-    <section className="landlord-thread"><header><span className="demo-account-avatar">{initials(record.tenant.displayName)}</span><div><strong>{record.tenant.displayName}</strong><span>{record.id} · {record.property.address}, Apt {record.property.apartment}</span></div><span className="subtle-badge">Case thread</span></header><div className="landlord-thread-messages">{record.messages.length ? record.messages.map((message) => <article key={message.id} className={message.sender === "landlord" ? "from-manager" : ""}><div><strong>{message.sender === "landlord" ? "You" : message.sender === "tenant" ? record.tenant.displayName : "RentEscrow"}</strong><time>{fullDate(message.createdAt)} · {time(message.createdAt)}</time></div><p>{message.body}</p><span className="message-delivery capitalize">{message.delivery}</span></article>) : <EmptyState icon={MessageSquare} title="No messages yet">Start the case conversation with a clear repair update.</EmptyState>}</div></section>
-    <form className="landlord-composer" onSubmit={submit}><span className="eyebrow">MESSAGE TENANT</span><h2>Send a case update</h2><p>Messages become part of the case timeline. Keep dates and commitments specific.</p><label htmlFor="landlord-message">Message</label><textarea id="landlord-message" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Share a scheduling update or ask a question…" rows={8} maxLength={2000} disabled={pending} required /><div className="composer-count"><span>Sent to {record.tenant.displayName}</span><span>{body.length}/2000</span></div><Button type="submit" variant="primary" icon={Send} busy={pending} disabled={!body.trim()}>Send message</Button></form>
+    <section className="landlord-thread"><header><span className="demo-account-avatar">{initials(record.tenant.displayName)}</span><div><strong>{record.tenant.displayName}</strong><span>{record.id} · {record.property.address}, Apt {record.property.apartment}</span></div><span className="subtle-badge" role="status">{photonModeLabel(integration)}</span></header><div className="landlord-thread-messages">{record.messages.length ? record.messages.map((message) => <LandlordMessage key={message.id} message={message} record={record} landlordName={landlordName} />) : <EmptyState icon={MessageSquare} title="No messages yet">Start the case conversation with a clear repair update.</EmptyState>}</div></section>
+    <form className="landlord-composer" onSubmit={submit}><span className="eyebrow">CASE RECORD</span><h2>Add case message</h2><p>This form saves a note in RentEscrow. For iMessage coordination and agent interpretation, reply to the case conversation on your phone.</p><label htmlFor="landlord-message">Message</label><textarea id="landlord-message" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Add a scheduling update or repair note…" rows={8} maxLength={2000} disabled={pending} required /><div className="composer-count"><span>Case {record.id} · visible to {record.tenant.displayName}</span><span>{body.length}/2000</span></div><Button type="submit" variant="primary" icon={MessageSquare} busy={pending} disabled={!body.trim()}>Add case message</Button><p className="panel-footnote">{integration?.detail || "Photon messaging is unavailable. Phone replies cannot be received right now."}</p>{integration?.status === "configured" && <p className="panel-footnote">Phone messages show provider acceptance separately from delivery and reading.</p>}{integration?.status === "demo" && <p className="panel-footnote">Photon demo activity stays within this workspace.</p>}</form>
   </div>;
+}
+
+function LandlordMessage({ message, record, landlordName }: { message: LandlordCase["messages"][number]; record: LandlordCase; landlordName: string }) {
+  return <article className={message.sender === "landlord" || (message.sender === "agent" && message.originatingAgent === "landlord") ? "from-manager" : ""}>
+    <div><strong>{messageRoleLabel(message, record.tenant.displayName, landlordName, "landlord")}</strong><time>{fullDate(message.createdAt)} · {time(message.createdAt)}</time></div>
+    <p>{message.body}</p>
+    {message.interpretation && <p className="message-interpretation"><strong>Agent interpretation · {message.interpretation.source === "gemini" ? "Gemini" : "Rules"}:</strong> {message.interpretation.summary}{message.interpretation.scheduledFor ? ` · ${message.interpretation.scheduledFor}` : ""}</p>}
+    <span className="message-delivery">{messageDeliveryLabel(message)}</span>
+    {message.delivery === "sent" && <p className="message-state-note">Accepted by the provider; delivery and reading are not confirmed.</p>}
+    {message.delivery === "pending" && <p className="message-state-note">Awaiting provider confirmation. Do not resend.</p>}
+    {message.delivery === "uncertain" && <p className="message-state-note">Provider acceptance could not be confirmed.</p>}
+    {message.failureReason && <p className="message-state-note message-state-error" role="status">{message.failureReason}</p>}
+  </article>;
 }
 
 function RepairsView({ record, pending, error, onSchedule, onComplete, onUpload, onPreview }: { record: LandlordCase; pending: PendingAction; error: string; onSchedule: (date: string, notes: string) => Promise<boolean>; onComplete: (notes: string) => Promise<boolean>; onUpload: (form: FormData) => Promise<boolean>; onPreview: (record: EvidenceRecord) => void }) {
@@ -285,7 +337,8 @@ function RepairUploadDialog({ pending, error, onClose, onUpload }: { pending: bo
 }
 
 function PropertyView({ cases, record, onSelect, buildingContext, onBuilding }: { cases: LandlordCase[]; record: LandlordCase; onSelect: (id: string) => void; buildingContext: BuildingContextState; onBuilding: () => void }) {
-  return <div className="property-view"><section className="property-hero"><span className="property-icon"><Building2 size={28} /></span><div><span className="eyebrow">MANAGED PROPERTY</span><h2>{record.property.address}</h2><p>{record.property.borough}, New York · Property ID {record.property.id}</p></div><span className="subtle-badge badge-green">{cases.length} assigned {cases.length === 1 ? "case" : "cases"}</span></section><BuildingHistorySummary building={buildingContext.building} issue={record.issue} address={record.property.address} borough={record.property.borough} loading={buildingContext.loading} error={buildingContext.error} onOpen={onBuilding} /><section className="property-cases"><div className="landlord-section-title"><span>Cases at this property</span></div>{cases.map((item) => <article key={item.id}><span className="property-case-icon"><Wrench size={18} /></span><div><strong>{item.id} · {item.title}</strong><p>Apt {item.property.apartment} · {item.tenant.displayName} · Opened {fullDate(item.createdAt)}</p></div><StatusBadge status={item.status} /><Button onClick={() => onSelect(item.id)}>Review case</Button></article>)}</section><section className="privacy-card"><ShieldCheck size={21} /><div><strong>Tenant privacy is built into this view</strong><p>You can review repair records and high-level escrow status. Bank accounts, transactions, identifiers, and settlement controls remain available only to the tenant.</p></div></section></div>;
+  const propertyCases = cases.filter((item) => item.property.id === record.property.id);
+  return <div className="property-view"><section className="property-hero"><span className="property-icon"><Building2 size={28} /></span><div><span className="eyebrow">MANAGED PROPERTY</span><h2>{record.property.address}</h2><p>{record.property.borough}, New York · Property ID {record.property.id}</p></div><span className="subtle-badge badge-green">{propertyCases.length} assigned {propertyCases.length === 1 ? "case" : "cases"}</span></section><BuildingHistorySummary building={buildingContext.building} issue={record.issue} address={record.property.address} borough={record.property.borough} loading={buildingContext.loading} error={buildingContext.error} onOpen={onBuilding} /><section className="property-cases"><div className="landlord-section-title"><span>Cases at this property</span></div>{propertyCases.map((item) => <article key={item.id}><span className="property-case-icon"><Wrench size={18} /></span><div><strong>{item.id} · {item.title}</strong><p>Apt {item.property.apartment} · {item.tenant.displayName} · Opened {fullDate(item.createdAt)}</p></div><StatusBadge status={item.status} /><Button onClick={() => onSelect(item.id)}>Review case</Button></article>)}</section><section className="privacy-card"><ShieldCheck size={21} /><div><strong>Tenant privacy is built into this view</strong><p>You can review repair records and high-level escrow status. Bank accounts, transactions, identifiers, and settlement controls remain available only to the tenant.</p></div></section></div>;
 }
 
 function EvidenceTile({ evidence, onPreview }: { evidence: EvidenceRecord; onPreview: (record: EvidenceRecord) => void }) {

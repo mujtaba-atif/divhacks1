@@ -26,7 +26,7 @@ function settlement(record: CaseRecord, status: XrplSettlement["status"]): XrplS
   };
 }
 
-async function mockXrpl(page: Page, initial: "unbound" | "ready" | "pending" | "failed", options: { integration?: IntegrationStatus; submissionFailure?: boolean } = {}) {
+async function mockXrpl(page: Page, initial: "unbound" | "ready" | "pending" | "failed", options: { integration?: IntegrationStatus; submissionFailure?: boolean; awaitingConfirmation?: boolean } = {}) {
   const actions: CaseAction[] = [];
   const base = createDemoCase("xrpl-browser-fixture");
   const now = new Date().toISOString();
@@ -35,7 +35,7 @@ async function mockXrpl(page: Page, initial: "unbound" | "ready" | "pending" | "
     ...base,
     status: "verified",
     repairReported: true,
-    tenantConfirmed: true,
+    tenantConfirmed: !options.awaitingConfirmation,
     verification: after.analysis,
     evidence: [...base.evidence, after],
     escrow: { ...base.escrow, status: "locked", lockedAt: now, audit: [] },
@@ -64,6 +64,7 @@ async function mockXrpl(page: Page, initial: "unbound" | "ready" | "pending" | "
     actions.push(action);
     let policy: PolicyResult | undefined;
     if (action.action === "enable_xrpl") current = { ...current, xrplSettlement: settlement(current, "ready") };
+    else if (action.action === "authorize_xrpl_agent") current = { ...current, xrplSettlement: { ...current.xrplSettlement!, agentAuthorizedAt: new Date().toISOString() } };
     else if (action.action === "policy_check") {
       policy = { approved: true, checks: [{ key: "network", label: "Demo network", passed: true, detail: "Simulated USD policy only." }] };
     } else if (action.action === "xrpl_security_demo") {
@@ -85,20 +86,39 @@ async function mockXrpl(page: Page, initial: "unbound" | "ready" | "pending" | "
       };
       current = { ...current, escrow: { ...current.escrow, audit: [...current.escrow.audit, audit] } };
       policy = { approved: false, checks: [{ key: audit.code!, label: "Authorized recipient", passed: false, detail: audit.detail }] };
-    } else if (action.action === "settle_xrpl" || action.action === "reconcile_xrpl") {
+    } else if (action.action === "settle_xrpl" || action.action === "reconcile_xrpl" || action.action === "confirm_resolution") {
       if (action.action === "settle_xrpl" && options.submissionFailure) {
         current = { ...current, xrplSettlement: { ...settlement(current, "failed"), errorCode: "XRPL_SUBMISSION_UNCERTAIN", detail: "Reconcile the recorded transaction hash before another payment." } };
         return route.fulfill({ status: 409, json: { error: current.xrplSettlement!.detail, code: "XRPL_SUBMISSION_UNCERTAIN", case: current } });
       }
-      const validated = { ...settlement(current, "validated"), ledgerIndex: 9_876_543, result: "tesSUCCESS", validatedAt: new Date().toISOString() };
+      const validated = { ...settlement(current, "validated"), agentAuthorizedAt: current.xrplSettlement?.agentAuthorizedAt,
+        ...(action.action === "confirm_resolution" ? { agentRequestedAt: new Date().toISOString() } : {}),
+        ledgerIndex: 9_876_543, result: "tesSUCCESS", validatedAt: new Date().toISOString() };
       const receipt: AuditRecord = { id: "payment-validated", action: "Payment", createdAt: new Date().toISOString(), status: "validated", network: "testnet", amountCents: 0, amountDrops: validated.amountDrops, approvedAmountDrops: validated.amountDrops, source: tenant, destination: landlord, hash, ledgerIndex: validated.ledgerIndex, result: "tesSUCCESS", validated: true, detail: "Payment validated on XRPL Testnet." };
-      current = { ...current, status: "resolved", xrplSettlement: validated, escrow: { ...current.escrow, status: "released", releasedAt: new Date().toISOString(), audit: [...current.escrow.audit, receipt] } };
+      current = { ...current, tenantConfirmed: true, status: "resolved", xrplSettlement: validated, escrow: { ...current.escrow, status: "released", releasedAt: new Date().toISOString(), audit: [...current.escrow.audit, receipt] } };
       policy = { approved: true, checks: [{ key: "DESTINATION_MATCH", label: "Recipient", passed: true, detail: "The recipient matches trusted case state." }] };
     } else return route.fulfill({ status: 400, json: { error: `Unexpected action: ${action.action}` } });
     await route.fulfill({ status: 200, json: { case: current, policy } });
   });
   return { actions };
 }
+
+test("agent authorization reviews exact permission, then tenant confirmation triggers settlement without a payment request", async ({ page }) => {
+  const { actions } = await mockXrpl(page, "ready", { awaitingConfirmation: true });
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Escrow", exact: true }).click();
+  await page.getByRole("button", { name: "Review agent authorization", exact: true }).click();
+  const review = page.getByRole("dialog", { name: "Authorize XRPL settlement agent" });
+  await expect(review.getByText("10 Test XRP", { exact: true })).toBeVisible();
+  await expect(review.getByText(landlord, { exact: true })).toBeVisible();
+  await review.getByRole("button", { name: "Authorize agent settlement", exact: true }).click();
+  await expect(page.getByText("Agent settlement authorized", { exact: true })).toBeVisible();
+  await expect(page.getByText("Settlement complete", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Confirm repair is complete", exact: true }).click();
+  await expect(page.getByText("Settlement complete", { exact: true })).toBeVisible();
+  await expect(page.getByText("Agent requested settlement", { exact: true })).toBeVisible();
+  expect(actions).toEqual([{ action: "authorize_xrpl_agent" }, { action: "confirm_resolution" }]);
+});
 
 test("case-bound Testnet settlement requires review and exposes the validated receipt", async ({ page }) => {
   await mockXrpl(page, "unbound");
@@ -141,8 +161,8 @@ test("a pending signed payment stays unsettled until reconciliation validates it
   await expect(page.getByText("Repair resolved. Case complete.", { exact: true })).toBeVisible();
 });
 
-test("unavailable Atlas settlement exposes the server reason and keeps simulated release available", async ({ page }) => {
-  const detail = "Testnet payments require local storage on a single host. MongoDB case storage remains available for the simulated workflow.";
+test("unavailable settlement exposes the server reason and keeps simulated release available", async ({ page }) => {
+  const detail = "MongoDB is selected but its server connection is missing. Configure storage before enabling settlement.";
   const mock = await mockXrpl(page, "unbound", { integration: { id: "xrpl", name: "XRPL Testnet", status: "unavailable", detail } });
   await page.goto("/");
   await page.getByRole("tab", { name: "Escrow", exact: true }).click();

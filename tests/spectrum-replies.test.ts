@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeSpectrumReply, runSpectrumReplies, type ReplyApp } from "../scripts/spectrum-replies";
 import { ApiError } from "../src/lib/server/errors";
+import { PhotonCaseBindingRejectedError, type ParticipantReceiveResult, type PhotonBindingDiagnostic } from "../src/lib/server/cases";
 
 const config = { provider: "spectrum" as const, projectId: "test", projectSecret: "secret", allowedRecipient: "+15555550123", tenantId: "owner", caseId: "RE-1042", sendingLine: "+15555550124" };
 const room = { id: "conversation", type: "dm", phone: config.sendingLine };
@@ -66,6 +67,66 @@ test("listener filters unrelated contacts/lines and ignores rejected conversatio
   } }), 0);
   assert.equal(calls, 1);
   assert.equal(h.stopped(), 1);
+});
+
+test("managed shared-line replies reach the receiver for exact case binding validation", async () => {
+  const h = harness();
+  const shared = { ...incoming, sendingLine: "shared" };
+  h.app.messages = (async function* () {
+    yield { ...shared, sender: "+15555550199" };
+    yield shared;
+  })();
+  assert.equal(await runSpectrumReplies(h.options), 0);
+  assert.deepEqual(h.received, [[config.tenantId, undefined, shared]]);
+});
+
+test("case binding rejection logs individual checks without contacts, message text or secrets", async () => {
+  const h = harness();
+  const diagnostic: PhotonBindingDiagnostic = {
+    caseId: "RE-1042", senderRole: "tenant", ownerMatch: true, bindingOwnerMatch: true, bindingCaseMatch: true,
+    tenantBindingExists: true, tenantUserIdMatch: true, tenantPhoneMatch: true,
+    landlordBindingExists: true, landlordUserIdMatch: true, landlordPhoneMatch: true, landlordContactMatch: true,
+    supportedCase: true, configuredCaseMatch: true, workspaceOwnerMatch: true,
+    workspaceTenantUserIdMatch: true, workspaceLandlordUserIdMatch: true, senderPhoneMatch: true,
+    sendingLineMatch: false, conversationMatch: false, conversationBindingExists: false,
+    firstConversationAllowed: true, knownRouteExists: false, quoteMatch: true, timestampMatch: true,
+  };
+  assert.equal(await runSpectrumReplies({ ...h.options, receiveParticipant: async () => {
+    throw new PhotonCaseBindingRejectedError("no_matching_conversation", [diagnostic]);
+  } }), 0);
+  const line = h.logs.find((entry) => entry.startsWith("CASE_BINDING_REJECTED "));
+  assert.ok(line);
+  assert.deepEqual(JSON.parse(line.slice("CASE_BINDING_REJECTED ".length)), { providerEventId: incoming.id, ...diagnostic });
+  assert.match(h.logs.join("\n"), /"reason":"case_binding_rejected","failedCheck":"no_matching_conversation"/);
+  assert.doesNotMatch(h.logs.join("\n"), /secret|Private reply|15555550123|15555550124/);
+  assert.equal(h.stopped(), 1);
+});
+
+test("listener reports interpretation, cold-start success, duplicates and explicit safe relay failures", async () => {
+  for (const status of ["sent", "failed", "uncertain"] as const) {
+    const h = harness();
+    h.app.messages = (async function* () { yield incoming; yield incoming; })();
+    let calls = 0;
+    const result = await runSpectrumReplies({ ...h.options, receiveParticipant: async () => {
+      const duplicate = calls++ > 0;
+      const processing: ParticipantReceiveResult["processing"] = {
+        caseId: "RE-1042", providerEventId: incoming.id, inboundMessageId: "stored-inbound-id",
+        role: "landlord", senderMasked: "+1 (***) ***-0123", duplicate,
+        intent: "scheduled", interpretationSource: "rules", eventType: "MAINTENANCE_SCHEDULED", caseStateUpdated: !duplicate,
+        relay: { role: "tenant", generated: true, attempted: !duplicate, recipientMasked: "+1 (***) ***-0558", status,
+          conversation: duplicate ? "not-started" : status === "sent" ? "cold-start-created" : "cold-start-requested",
+          ...(status === "sent" ? { providerMessageId: "outbound-provider-id" } : { reason: "The sending line is unavailable." }) },
+      };
+      return { case: {} as never, processing };
+    } });
+    assert.equal(result, 0);
+    assert.equal(h.received.length, 0, "the two-sided receiver takes priority over the legacy callback");
+    const logs = h.logs.join("\n");
+    assert.match(logs, /INBOUND_PHOTON_MESSAGE .*MAINTENANCE_SCHEDULED/);
+    assert.match(logs, /"duplicate":true/);
+    assert.match(logs, status === "sent" ? /TENANT_RELAY .*outbound-provider-id/ : /TENANT_RELAY_FAILED .*sending line is unavailable/);
+    assert.doesNotMatch(logs, /Case reply persisted or already recorded|secret|Private reply|15555550123/);
+  }
 });
 
 test("persistence failure stops consumption, closes the client, and is sanitized", async () => {

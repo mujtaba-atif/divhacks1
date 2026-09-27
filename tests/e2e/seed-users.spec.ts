@@ -10,15 +10,16 @@ test("user seeding is idempotent and initializes only the two tenant workspaces"
   const result = JSON.parse(stdout) as {
     first: { id: string; workspaceOwnerId: string }[];
     second: { id: string; workspaceOwnerId: string }[];
-    users: { email: string; role: string; displayName: string; hasBcryptHash: boolean; containsPlaintextPassword: boolean }[];
+    users: { email: string; role: string; displayName: string; hasBcryptHash: boolean; containsPlaintextPassword: boolean; contactConfigured: boolean }[];
     workspaces: { demoAccount: string; caseIds: string[]; xrplAuthorized: boolean }[];
     propertyCount: number;
+    bindingMatchesUsers: boolean;
   };
   expect(result.second).toEqual(result.first);
   expect(result.users).toHaveLength(3);
   expect(result.users.map((user) => [user.email, user.role, user.displayName])).toEqual([
       ["landlord@rentescrow.demo", "landlord", "Alex Morgan"],
-      ["tenant1@rentescrow.demo", "tenant", "Taylor Reed"],
+      ["tenant1@rentescrow.demo", "tenant", "Rayaan"],
       ["tenant2@rentescrow.demo", "tenant", "Jordan Lee"],
   ]);
   for (const user of result.users) {
@@ -31,4 +32,8 @@ test("user seeding is idempotent and initializes only the two tenant workspaces"
   expect(result.workspaces.find((workspace) => workspace.demoAccount === "tenant1")?.xrplAuthorized).toBe(true);
   expect(result.workspaces.find((workspace) => workspace.demoAccount === "tenant2")?.xrplAuthorized).toBe(false);
   expect(result.propertyCount).toBe(1);
+  expect(result.bindingMatchesUsers).toBe(true);
+  expect(result.users.filter((user) => user.contactConfigured).map((user) => user.email)).toEqual([
+    "landlord@rentescrow.demo", "tenant1@rentescrow.demo",
+  ]);
 });

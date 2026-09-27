@@ -3,8 +3,8 @@ import { getBuildingSummary } from "./building-context";
 import { demoFinancialProfile, demoRentHistory } from "./financial-fixture";
 
 export const DEMO_PARTICIPANTS = {
-  tenant: { name: "Mujtaba Atif", phone: "+12018567033" },
-  landlord: { name: "Rayyan Khan", phone: "+19736060558" },
+  tenant: { name: "Rayaan", phone: "+19736060558" },
+  landlord: { name: "Alex Morgan", phone: "+12018567033" },
 } as const;
 
 const at = (daysAgo = 0, hour = 10) => {

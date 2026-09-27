@@ -14,6 +14,9 @@ export interface AuthUserRecord {
   passwordHash: string;
   role: UserRole;
   displayName: string;
+  /** Operator-configured E.164 contact, never a login credential. */
+  phoneContact?: string;
+  phoneContactConfiguredAt?: Date;
   createdAt: Date;
   updatedAt?: Date;
 }

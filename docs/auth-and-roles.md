@@ -34,7 +34,7 @@ It prints only each account's email, role, and display name.
 
 | Display name | Email | Demo password | Role |
 | --- | --- | --- | --- |
-| Taylor Reed | tenant1@rentescrow.demo | TenantDemo123! | Tenant |
+| Rayaan | tenant1@rentescrow.demo | TenantDemo123! | Tenant |
 | Jordan Lee | tenant2@rentescrow.demo | TenantDemo123! | Tenant |
 | Alex Morgan | landlord@rentescrow.demo | LandlordDemo123! | Landlord |
 
@@ -77,10 +77,10 @@ landlords to `/landlord`. Opposite-role page visits redirect safely. Tenant
 APIs reject landlords with `403 ROLE_NOT_ALLOWED`; unauthenticated API requests
 return `401 AUTH_REQUIRED`.
 
-Taylor owns case `RE-1042`, for 123 Example Street, apartment 4B. The case stores
-Taylor's `tenantUserId`, Alex's `landlordUserId`, and a property ID. Jordan starts
+Rayaan owns case `RE-1042`, for 123 Example Street, apartment 4B. The case stores
+Rayaan's `tenantUserId`, Alex's `landlordUserId`, and a property ID. Jordan starts
 without cases. Every tenant request resolves its workspace from the signed-in
-user and checks case ownership; guessing Taylor's case ID returns
+user and checks case ownership; guessing Rayaan's case ID returns
 `403 CASE_ACCESS_DENIED`. Dashboard, evidence, messages, finances, exports, and
 settlement share this boundary. Resetting Jordan's demo keeps it empty.
 
@@ -109,7 +109,7 @@ tenants cannot simulate or paste landlord replies through the tenant action API.
 Manager uploads are rejected after tenant verification or confirmation so they
 cannot invalidate a tenant's completed review.
 
-Only Taylor's server-seeded workspace may use the configured Testnet signer.
+Only Rayaan's server-seeded workspace may use the configured Testnet signer.
 Jordan's workspace cannot enable, settle, reconcile, or inspect that signer via
 the security demonstrations. This capability stays in server state and is never
 accepted from the browser. Simulated USD features remain available to Jordan's
@@ -117,7 +117,7 @@ own cases.
 
 ## Full demonstration
 
-1. Open `/login`, choose Tenant 1, and sign in as Taylor.
+1. Open `/login`, choose Tenant 1, and sign in as Rayaan.
 2. Open `RE-1042`: inspect the no-heat report, 54°F sample, Finances, and $400
    disputed amount. Refresh financial context when needed.
 3. Approve a landlord message in Messages. With Photon disabled it stays in the
@@ -125,14 +125,14 @@ own cases.
 4. Sign out; choose Property manager and sign in as Alex. Review the assigned
    case, evidence, and thread. Open Repairs, enter an appointment and notes,
    optionally upload a repair photo, then report completion with notes.
-5. Sign out and sign back in as Taylor. The completion and timeline persist.
+5. Sign out and sign back in as Rayaan. The completion and timeline persist.
 6. Upload a new after-repair photo and analyze it with configured Gemini. For
    the deterministic demo, use **Add after photo** and analyze the clearly
    labeled 72°F sample instead. Real uploads remain unverified without Gemini.
 7. Select **Verify repair**, then **Confirm repair is complete**. Review and
    release the simulated escrow. If Testnet settlement is enabled, its separate
    review, policy checks, and validated receipt remain required.
-8. Sign out and sign in as Jordan. Taylor's case and banking information are
+8. Sign out and sign in as Jordan. Rayaan's case and banking information are
    absent, and direct requests for `RE-1042` are rejected.
 
 Nessie and Photon operator bindings use the stable `workspaceOwnerId` returned
@@ -188,3 +188,5 @@ an operator must review against the durable journal and XRPL state before
 removing. This avoids an expired lease allowing a second process to sign the
 same payment. Publicly known demo credentials are unsuitable for personal
 records on a public deployment. XRPL uses Test XRP; USD escrow remains a simulation.
+
+Configured phone contacts and the two-sided iMessage walkthrough are documented in [Photon Spectrum](photon-spectrum.md). Phone numbers are contact destinations, never login credentials; ordinary account UI shows only masked numbers.

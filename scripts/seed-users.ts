@@ -1,5 +1,6 @@
 import { ObjectId } from "mongodb";
 import type { AuthUser } from "../src/lib/types";
+import { DEMO_PARTICIPANTS } from "../src/lib/seed";
 import {
   ensureAuthIndexes,
   USERS_COLLECTION,
@@ -16,7 +17,8 @@ const DEMO_USERS = [
     email: "tenant1@rentescrow.demo",
     password: "TenantDemo123!",
     role: "tenant",
-    displayName: "Taylor Reed",
+    displayName: DEMO_PARTICIPANTS.tenant.name,
+    phoneContact: DEMO_PARTICIPANTS.tenant.phone,
   },
   {
     email: "tenant2@rentescrow.demo",
@@ -29,6 +31,7 @@ const DEMO_USERS = [
     password: "LandlordDemo123!",
     role: "landlord",
     displayName: "Alex Morgan",
+    phoneContact: DEMO_PARTICIPANTS.landlord.phone,
   },
 ] as const;
 
@@ -62,6 +65,7 @@ export async function seedUsers(): Promise<AuthUser[]> {
           passwordHash,
           role: demo.role,
           displayName: demo.displayName,
+          ...("phoneContact" in demo ? { phoneContact: demo.phoneContact, phoneContactConfiguredAt: now } : {}),
           updatedAt: now,
         },
         $setOnInsert: { _id: new ObjectId(), createdAt: now },
@@ -88,7 +92,10 @@ export async function seedUsers(): Promise<AuthUser[]> {
     { upsert: true },
   );
 
-  for (const user of seeded) await initializeUserWorkspace(user, landlord.id);
+  for (const user of seeded) await initializeUserWorkspace(user, landlord.id, {
+    ...(user.email === "tenant1@rentescrow.demo" ? { tenantPhone: DEMO_PARTICIPANTS.tenant.phone } : {}),
+    landlordPhone: DEMO_PARTICIPANTS.landlord.phone,
+  });
   return seeded;
 }
 

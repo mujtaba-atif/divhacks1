@@ -3,8 +3,8 @@ import type { APIRequestContext } from "@playwright/test";
 import type { CaseRecord, DashboardData } from "../../src/lib/types";
 import { origin } from "./environment";
 
-const tenant = { name: "Mujtaba Atif", phone: "+12018567033" };
-const landlord = { name: "Rayyan Khan", contact: "+19736060558" };
+const tenant = { name: "Rayaan", phone: "+19736060558" };
+const landlord = { name: "Alex Morgan", contact: "+12018567033" };
 const approvalLabel = "I reviewed this message and approve sending it.";
 
 async function dashboard(request: APIRequestContext): Promise<DashboardData> {
@@ -23,6 +23,7 @@ async function resetWorkspace(request: APIRequestContext) {
 }
 
 function expectBoundParticipants(record: CaseRecord) {
+  expect(record.messagingBinding).toBeUndefined();
   expect(record.tenant).toEqual(tenant);
   expect(record.tenantName).toBe(tenant.name);
   expect(record.tenantPhone).toBe(tenant.phone);
@@ -47,8 +48,9 @@ test("a brand-new form-created case retains the tenant and landlord through relo
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel("Landlord / property manager", { exact: true })).toHaveValue(landlord.name);
   await expect(dialog.getByLabel("Landlord / property manager", { exact: true })).toHaveAttribute("readonly", "");
-  await expect(dialog.getByLabel("Landlord contact", { exact: true })).toHaveValue(landlord.contact);
+  await expect(dialog.getByLabel("Landlord contact", { exact: true })).toHaveValue("+1 (***) ***-7033");
   await expect(dialog.getByLabel("Landlord contact", { exact: true })).toHaveAttribute("readonly", "");
+  await expect(dialog.getByText("Creating this case authorizes the Tenant Agent", { exact: false })).toBeVisible();
   await dialog.getByLabel("Street address", { exact: true }).fill("123 Example Street");
   await dialog.getByLabel("Borough").selectOption("Brooklyn");
   await dialog.getByLabel("Apartment", { exact: true }).fill("9C");
@@ -65,6 +67,10 @@ test("a brand-new form-created case retains the tenant and landlord through relo
   expect(record.apartment).toBe("9C");
   expectBoundParticipants(record);
   await expect(dialog).not.toBeVisible();
+  expect(record.messages).toEqual(expect.arrayContaining([expect.objectContaining({
+    sender: "agent", originatingAgent: "tenant", recipientUserId: record.landlordUserId, delivery: "demo",
+  })]));
+  await expect(page.locator(".progress-track li").nth(1)).toHaveClass(/active/);
   const stored = (await dashboard(page.request)).cases.find((item) => item.id === record.id);
   expect(stored).toBeDefined();
   expectBoundParticipants(stored!);
@@ -74,10 +80,11 @@ test("a brand-new form-created case retains the tenant and landlord through relo
   await page.getByRole("tab", { name: "Messages", exact: true }).click();
   const messages = page.getByRole("tabpanel", { name: "Messages", exact: true });
   await expect(messages.locator(".conversation-heading").getByText(landlord.name, { exact: true })).toBeVisible();
-  await expect(messages.getByText(landlord.contact, { exact: true })).toBeVisible();
+  await expect(messages.getByText("+1 (***) ***-7033", { exact: true }).first()).toBeVisible();
+  await expect(messages.getByText(landlord.contact, { exact: true })).toHaveCount(0);
   const draft = messages.getByRole("textbox", { name: "Message to property manager", exact: true });
-  await expect(draft).toHaveValue(/Hello Rayyan Khan,/);
-  await expect(draft).toHaveValue(/Mujtaba Atif/);
+  await expect(draft).toHaveValue(/Hello Alex Morgan,/);
+  await expect(draft).toHaveValue(/Rayaan/);
   const approval = messages.getByRole("checkbox", { name: approvalLabel, exact: true });
   const send = messages.getByRole("button", { name: "Approve & send", exact: true });
   await expect(approval).not.toBeChecked();
@@ -99,8 +106,8 @@ test("a brand-new form-created case retains the tenant and landlord through relo
   expect(message?.body).toContain(`RentEscrow case: ${record.id}`);
   expect(message?.providerMessageId).toBeUndefined();
   expectBoundParticipants(sentCase);
-  await expect(messages.getByText("Simulated delivery", { exact: true })).toBeVisible();
-  await expect(messages.getByText(`Recipient: ${landlord.contact}`, { exact: true })).toBeVisible();
+  await expect(messages.getByText("Simulated delivery", { exact: true }).last()).toBeVisible();
+  await expect(messages.getByText("Recipient: +1 (***) ***-7033", { exact: true }).last()).toBeVisible();
   const persisted = (await dashboard(page.request)).cases.find((item) => item.id === record.id)!;
   expectBoundParticipants(persisted);
   expect(persisted.messages.find((item) => item.requestId === submitted.requestId)).toEqual(message);

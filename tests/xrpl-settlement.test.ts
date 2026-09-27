@@ -84,6 +84,10 @@ test("settlement policy binds tenant, case, wallets, XRP, USD, scope, network an
   }
   assert.equal(evaluateXrplPolicy(record, intent, "another-tenant").approved, false);
   for (const change of [
+    { tenantUserId: "substituted-tenant" }, { landlordUserId: "substituted-landlord" },
+    { escrow: { ...record.escrow, destination: "substituted-beneficiary" } },
+  ]) assert.equal(evaluateXrplPolicy({ ...record, ...change }, intent, record.ownerId).approved, false);
+  for (const change of [
     { repairReported: false }, { tenantConfirmed: false }, { verification: undefined },
     { evidence: record.evidence.filter((item) => item.stage !== "after") },
     { financialPolicyContext: { accountCustomerBound: false } },
@@ -98,6 +102,11 @@ test("real transaction boundary signs only exact Payment, persists hash before s
   let pending: XrplPending | undefined;
   const receipt = await executeXrplSettlement({ ownerId: record.ownerId, loadCase: async () => structuredClone(record),
     beforeSubmit: async (value) => { assert.equal(state.submits, 0); pending = value; } });
+  assert.equal(pending?.policyDecision?.approved, true);
+  assert.ok(pending?.policyDecision?.checks.some((check) => check.key === "LANDLORD_MISMATCH" && check.passed));
+  assert.ok(pending?.policyDecision?.checks.some((check) => check.key === "XRPL_SPENDABLE_BALANCE" && check.passed));
+  assert.ok(pending?.policyDecision?.checks.some((check) => check.key === "XRPL_FINAL_TRANSACTION" && check.passed));
+  assert.ok(pending?.policyCheckedAt);
   assert.ok(pending);
   assert.equal(receipt.hash, pending.hash);
   assert.equal(receipt.result, "tesSUCCESS");
@@ -186,7 +195,10 @@ test("failed durable pre-submit persistence prevents ledger dispatch", async (t)
   const { wallet, record } = fixture(t);
   const state = ledger(t, wallet.classicAddress);
   await assert.rejects(executeXrplSettlement({ ownerId: record.ownerId, loadCase: async () => record,
-    beforeSubmit: async () => { throw new Error("disk full"); } }));
+    beforeSubmit: async () => { throw new Error("disk full"); } }),
+  (error: unknown) => error instanceof XrplError && error.signed === true && !error.submittedHash
+    && !error.message.includes("Nothing signed"));
+  assert.equal(state.signs, 1);
   assert.equal(state.submits, 0);
 });
 

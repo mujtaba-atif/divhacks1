@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import type { CaseAction, CaseRecord } from "../src/lib/types";
-import { prepareLandlordMessage, sendLandlordMessage } from "../src/lib/integrations/photon";
+import { prepareLandlordMessage, sendLandlordMessage, prepareParticipantMessage } from "../src/lib/integrations/photon";
+import { classifyParticipantMessage, buildAgentRelay } from "../src/lib/integrations/messaging-agent";
 import { DeliveryUncertainError, IntegrationError } from "../src/lib/integrations/shared";
+import { spectrumClientFromIMessage, type SpectrumIMessageApi } from "../src/lib/integrations/spectrum";
 import { actionSchema, newCaseSchema } from "../src/lib/server/validation";
 
 const originalDirectory = process.cwd();
@@ -14,6 +16,7 @@ let directory: string;
 let performCaseAction: typeof import("../src/lib/server/cases")["performCaseAction"];
 let createCase: typeof import("../src/lib/server/cases")["createCase"];
 let receiveLandlordMessage: typeof import("../src/lib/server/cases")["receiveLandlordMessage"];
+let receiveParticipantMessage: typeof import("../src/lib/server/cases")["receiveParticipantMessage"];
 let createSession: typeof import("../src/lib/server/store")["createSession"];
 let mutateSession: typeof import("../src/lib/server/store")["mutateSession"];
 let readSession: typeof import("../src/lib/server/store")["readSession"];
@@ -22,7 +25,7 @@ let bindPhotonCase: typeof import("../scripts/bind-photon-case")["bindPhotonCase
 before(async () => {
   directory = await mkdtemp(path.join(tmpdir(), "rentescrow-messaging-"));
   process.chdir(directory);
-  ({ createCase, performCaseAction, receiveLandlordMessage } = await import("../src/lib/server/cases"));
+  ({ createCase, performCaseAction, receiveLandlordMessage, receiveParticipantMessage } = await import("../src/lib/server/cases"));
   ({ createSession, mutateSession, readSession, resetSession } = await import("../src/lib/server/store"));
   ({ bindPhotonCase } = await import("../scripts/bind-photon-case"));
 });
@@ -76,16 +79,16 @@ test("both schema and service require explicit tenant approval and a request UUI
   assert.equal((await readSession(f.ownerId))?.cases[0].messages.length, 0);
 });
 
-test("reset and brand-new demo cases persist roles, authorize their own IDs and send Rayyan to the Spectrum boundary", async () => {
+test("reset and brand-new demo cases persist roles, authorize their own IDs and send Alex to the Spectrum boundary", async () => {
   const f = await fixture();
-  process.env.PHOTON_ALLOWED_RECIPIENT = "+1 (973) 606-0558";
+  process.env.PHOTON_ALLOWED_RECIPIENT = "+1 (201) 856-7033";
   await resetSession(f.ownerId);
   const assertRoles = (record: CaseRecord) => {
-    assert.equal(record.tenantName, "Mujtaba Atif");
-    assert.equal(record.tenantPhone, "+12018567033");
+    assert.equal(record.tenantName, "Rayaan");
+    assert.equal(record.tenantPhone, "+19736060558");
     assert.deepEqual(record.tenant, { name: record.tenantName, phone: record.tenantPhone });
-    assert.equal(record.landlordName, "Rayyan Khan");
-    assert.equal(record.landlordContact, "+19736060558");
+    assert.equal(record.landlordName, "Alex Morgan");
+    assert.equal(record.landlordContact, "+12018567033");
     assert.deepEqual(record.demoMessagingBinding, { ownerId: record.ownerId, caseId: record.id, recipient: record.landlordContact });
   };
   assertRoles((await readSession(f.ownerId))!.cases[0]);
@@ -99,23 +102,23 @@ test("reset and brand-new demo cases persist roles, authorize their own IDs and 
     const reloaded = (await readSession(f.ownerId))!.cases.find((record) => record.id === created.id)!;
     assertRoles(reloaded);
     assert.deepEqual(reloaded, created);
-    assert.equal(prepareLandlordMessage(reloaded, "Approved notice").recipient, "+19736060558");
+    assert.equal(prepareLandlordMessage(reloaded, "Approved notice").recipient, "+12018567033");
     cases.push(reloaded);
   }
   const record = cases[0];
   for (const invalid of [
     { ...record, ownerId: "another-owner" }, { ...record, id: "RE-UNBOUND" },
-    { ...record, demoMessagingBinding: undefined }, { ...record, landlordContact: "+12018567033" },
+    { ...record, demoMessagingBinding: undefined }, { ...record, landlordContact: "+19736060558" },
     { ...record, landlordContact: "" }, { ...record, case_type: "self_documentation" as const },
   ]) assert.throws(() => prepareLandlordMessage(invalid, "Approved notice"));
   const destinations: string[] = [];
-  const conversationId = "any;-;+19736060558";
+  const conversationId = "any;-;+12018567033";
   let sends = 0;
   const messaging = {
     prepare: prepareLandlordMessage,
     send: (current: CaseRecord, body: string) => sendLandlordMessage(current, body, {
       createApp: async () => ({
-        createDirectMessage: async (recipient) => {
+        openDirectMessage: async (recipient) => {
           destinations.push(recipient);
           const stored = (await readSession(f.ownerId))!.cases.find((item) => item.id === current.id)!;
           assert.equal(stored.messages.at(-1)?.delivery, "pending");
@@ -128,13 +131,13 @@ test("reset and brand-new demo cases persist roles, authorize their own IDs and 
     }),
   };
   const sent = await performCaseAction(f.ownerId, record.id, action(), messaging);
-  assert.equal(sent.case.messages.at(-1)?.recipient, "+19736060558");
+  assert.equal(sent.case.messages.at(-1)?.recipient, "+12018567033");
   assert.equal(sent.case.messages.at(-1)?.delivery, "sent");
-  assert.deepEqual(destinations, ["+19736060558"]);
+  assert.deepEqual(destinations, ["+12018567033"]);
   assert.deepEqual(sent.case.escrow, record.escrow);
   assert.deepEqual(sent.case.financialProfile, record.financialProfile);
   assertRoles((await readSession(f.ownerId))!.cases.find((item) => item.id === record.id)!);
-  const incoming = { id: "new-reply", conversationId, sender: "+19736060558", sendingLine: line,
+  const incoming = { id: "new-reply", conversationId, sender: "+12018567033", sendingLine: line,
     createdAt: new Date().toISOString(), body: "A technician is scheduled tomorrow." };
   assert.equal((await receiveLandlordMessage(f.ownerId, undefined, incoming)).case.id, record.id);
   await performCaseAction(f.ownerId, cases[1].id, action(), messaging);
@@ -148,7 +151,7 @@ test("demo creation uses its fallback only for an unset phone and rejects invali
   const f = await fixture();
   delete process.env.PHOTON_ALLOWED_RECIPIENT;
   await resetSession(f.ownerId);
-  assert.equal((await readSession(f.ownerId))!.cases[0].landlordContact, "+19736060558");
+  assert.equal((await readSession(f.ownerId))!.cases[0].landlordContact, "+12018567033");
   const before = await readSession(f.ownerId);
   process.env.PHOTON_ALLOWED_RECIPIENT = "muji";
   await assert.rejects(resetSession(f.ownerId), /valid configured phone/);
@@ -157,10 +160,10 @@ test("demo creation uses its fallback only for an unset phone and rejects invali
 
 test("operator correction preserves case history and financial state; reset restores the same demo roles", async () => {
   const f = await fixture();
-  process.env.PHOTON_ALLOWED_RECIPIENT = "+19736060558";
+  process.env.PHOTON_ALLOWED_RECIPIENT = "+12018567033";
   await mutateSession(f.ownerId, (document) => {
     const record = document.cases[0];
-    record.landlordName = "Alex Morgan";
+    record.landlordName = "Rayyan Khan";
     record.landlordContact = "";
     delete record.tenant;
     record.messages.push({ id: "old-failure", sender: "tenant", body: "Historical failure", recipient: "", delivery: "failed", provider: "spectrum", createdAt: new Date().toISOString() });
@@ -168,9 +171,9 @@ test("operator correction preserves case history and financial state; reset rest
   const before = (await readSession(f.ownerId))!;
   const other = await createSession();
   const corrected = await bindPhotonCase();
-  assert.equal(corrected.landlordName, "Rayyan Khan");
-  assert.equal(corrected.landlordContact, "+19736060558");
-  assert.deepEqual(corrected.tenant, { name: "Mujtaba Atif", phone: "+12018567033" });
+  assert.equal(corrected.landlordName, "Alex Morgan");
+  assert.equal(corrected.landlordContact, "+12018567033");
+  assert.deepEqual(corrected.tenant, { name: "Rayaan", phone: "+19736060558" });
   for (const key of ["ownerId", "messages", "evidence", "escrow", "financialProfile", "accountBalanceCents"] as const) {
     assert.deepEqual(corrected[key], before.cases[0][key]);
   }
@@ -191,17 +194,17 @@ test("normalized send logging identifies roles without logging credentials or me
   const sent = await performCaseAction(f.ownerId, f.caseId, action("Private notice body"), f.dependencies);
   assert.equal(sent.case.messages.at(-1)?.recipient, recipient);
   const logged = logger.mock.calls[0].arguments[1] as unknown as Record<string, unknown>;
-  assert.equal(logged.normalizedRecipient, recipient);
-  assert.equal(logged.allowedRecipient, recipient);
+  assert.equal(logged.normalizedRecipient, "+1 (***) ***-0100");
+  assert.equal(logged.allowedRecipient, "+1 (***) ***-0100");
   assert.equal(logged.provider, "spectrum");
-  assert.deepEqual(logged.tenant, { ownerId: f.ownerId, name: "Mujtaba Atif", phone: "+12018567033" });
+  assert.deepEqual(logged.tenant, { ownerId: f.ownerId, name: "Rayaan", phone: "+1 (***) ***-0558" });
   assert.doesNotMatch(JSON.stringify(logger.mock.calls), /offline-secret|Private notice body|SPECTRUM_PROJECT_SECRET/);
 });
 
 test("operator role correction cannot erase or rebind live or legacy uncertain history", async () => {
   for (const state of ["sent", "received", "pending", "uncertain", "legacy"] as const) {
     const f = await fixture();
-    process.env.PHOTON_ALLOWED_RECIPIENT = "+19736060558";
+    process.env.PHOTON_ALLOWED_RECIPIENT = "+12018567033";
     await mutateSession(f.ownerId, (document) => {
       if (state === "legacy") document.uncertainDeliveries = [{ caseId: f.caseId, messageHash: "legacy-reservation", createdAt: new Date().toISOString() }];
       else document.cases[0].messages.push({ id: state, sender: "tenant", body: "Historical message", recipient,
@@ -261,6 +264,132 @@ test("approved sends persist exact prepared content, receipt and timeline after 
   assert.equal(f.calls(), 1);
   assert.equal((await readSession(f.ownerId))?.cases[0].messages.length, 1);
   await assert.rejects(performCaseAction(f.ownerId, f.caseId, { ...request, body: "Different content" }, f.dependencies), /different message content/);
+});
+
+test("cold-start receipts persist on the participant and subsequent sends and replies reuse the binding", async () => {
+  for (const route of [line, "shared"]) {
+    const f = await fixture();
+    await mutateSession(f.ownerId, (document) => {
+      const record = document.cases[0];
+      record.tenantUserId = "tenant-user";
+      record.landlordUserId = "landlord-user";
+      record.messagingBinding = { ownerId: f.ownerId, caseId: f.caseId,
+        tenant: { userId: record.tenantUserId, phone: "+12125550101" },
+        landlord: { userId: record.landlordUserId, phone: recipient } };
+    });
+    const conversationId = `any;-;${recipient}`;
+    const created: unknown[] = [];
+    const reused: unknown[] = [];
+    let sends = 0;
+    const dm = { id: conversationId, type: "dm", phone: route, send: async (body: string) => ({
+      id: `cold-start-message-${++sends}`, platform: "imessage", direction: "outbound", content: { type: "text", text: body },
+      space: { id: conversationId, phone: route }, timestamp: new Date(), isSent: true,
+    }) };
+    const im: SpectrumIMessageApi = {
+      user: async (phone) => { assert.equal(phone, recipient); return { id: phone, __platform: "imessage" }; },
+      space: {
+        create: async (user, params) => { created.push([user.id, params]); return dm; },
+        get: async (id, params) => { reused.push([id, params]); return dm; },
+      },
+    };
+    const dependencies = { prepare: prepareLandlordMessage,
+      send: (record: CaseRecord, body: string) => sendLandlordMessage(record, body, {
+        createApp: async () => spectrumClientFromIMessage(im, async () => {}),
+      }) };
+    await performCaseAction(f.ownerId, f.caseId, action("Please repair the heating."), dependencies);
+    let stored = (await readSession(f.ownerId))!.cases[0];
+    assert.deepEqual(stored.messagingBinding?.landlord,
+      { userId: "landlord-user", phone: recipient, conversationId, sendingLine: route });
+    assert.equal(stored.messages.at(-1)?.providerConversationId, conversationId);
+    await performCaseAction(f.ownerId, f.caseId, action("Please confirm receipt of my request."), dependencies);
+    assert.deepEqual(created, [[recipient, { phone: line }]]);
+    assert.deepEqual(reused, [[conversationId, { phone: route }]]);
+    assert.equal(sends, 2);
+    process.env.PHOTON_TENANT_PHONE = "+12125550101";
+    await receiveParticipantMessage(f.ownerId, {
+      id: "cold-start-reply", conversationId, sendingLine: route, sender: recipient,
+      body: "Thanks for your message.", createdAt: new Date().toISOString(),
+    }, { prepare: prepareParticipantMessage, classify: classifyParticipantMessage, relay: buildAgentRelay,
+      send: async (record, role, body) => ({ ...prepareParticipantMessage(record, role, body), delivery: "demo" }) });
+    stored = (await readSession(f.ownerId))!.cases[0];
+    assert.equal(stored.messages.find((message) => message.providerMessageId === "cold-start-reply")?.delivery, "received");
+    assert.equal(stored.messagingBinding?.landlord.conversationId, conversationId);
+    await assert.rejects(receiveLandlordMessage(f.ownerId, f.caseId, {
+      id: "wrong-shared-binding", conversationId, sendingLine: route === "shared" ? line : "shared", sender: recipient,
+      body: "Thanks.", createdAt: new Date().toISOString(),
+    }), /conversation/);
+  }
+});
+
+test("failed DM creation is durably failed without a delivery receipt or conversation binding", async () => {
+  const f = await fixture();
+  await mutateSession(f.ownerId, (document) => {
+    const record = document.cases[0];
+    record.tenantUserId = "tenant-user";
+    record.landlordUserId = "landlord-user";
+    record.messagingBinding = { ownerId: f.ownerId, caseId: f.caseId,
+      tenant: { userId: record.tenantUserId, phone: "+12125550101" },
+      landlord: { userId: record.landlordUserId, phone: recipient } };
+  });
+  let creations = 0;
+  const im: SpectrumIMessageApi = { user: async (phone) => ({ id: phone, __platform: "imessage" }),
+    space: {
+      create: async () => { creations++; throw new Error("private provider creation failure"); },
+      get: async () => { assert.fail("An unbound case must use cold-start creation"); },
+    } };
+  await assert.rejects(performCaseAction(f.ownerId, f.caseId, action(), {
+    prepare: prepareLandlordMessage,
+    send: (record, body) => sendLandlordMessage(record, body, {
+      createApp: async () => spectrumClientFromIMessage(im, async () => {}),
+    }),
+  }), /could not prepare/);
+  const stored = (await readSession(f.ownerId))!.cases[0];
+  assert.equal(creations, 1);
+  assert.equal(stored.messages.at(-1)?.delivery, "failed");
+  assert.equal(stored.messages.at(-1)?.providerMessageId, undefined);
+  assert.equal(stored.messages.at(-1)?.sentAt, undefined);
+  assert.equal(stored.messagingBinding?.landlord.conversationId, undefined);
+  assert.equal(stored.status, "open");
+});
+
+test("a saved unavailable line returns and persists safe guidance without allowing a blind retry", async () => {
+  const f = await fixture();
+  const conversationId = `any;-;${recipient}`;
+  await mutateSession(f.ownerId, (document) => {
+    const record = document.cases[0];
+    record.tenantUserId = "tenant-user";
+    record.landlordUserId = "landlord-user";
+    record.messagingBinding = { ownerId: f.ownerId, caseId: f.caseId,
+      tenant: { userId: record.tenantUserId, phone: "+12125550101" },
+      landlord: { userId: record.landlordUserId, phone: recipient, conversationId, sendingLine: line } };
+  });
+  let sends = 0;
+  const im: SpectrumIMessageApi = { user: async (phone) => ({ id: phone, __platform: "imessage" }),
+    space: {
+      create: async () => { assert.fail("A saved conversation must not be recreated"); },
+      get: async (id, params) => {
+        assert.equal(id, conversationId);
+        assert.deepEqual(params, { phone: line });
+        return { id, type: "dm", phone: line, send: async () => {
+          sends++;
+          throw new Error("No iMessage client serves phone private-provider-data. Available: private-lines");
+        } };
+      },
+    } };
+  const dependencies = { prepare: prepareLandlordMessage,
+    send: (record: CaseRecord, body: string) => sendLandlordMessage(record, body, {
+      createApp: async () => spectrumClientFromIMessage(im, async () => {}),
+    }) };
+  await assert.rejects(performCaseAction(f.ownerId, f.caseId, action(), dependencies), /sending line is unavailable/);
+  const stored = (await readSession(f.ownerId))!.cases[0];
+  const attempt = stored.messages.at(-1)!;
+  assert.equal(attempt.delivery, "uncertain");
+  assert.match(attempt.failureReason!, /SPECTRUM_SENDING_LINE/);
+  assert.doesNotMatch(attempt.failureReason!, /private-/);
+  assert.equal(attempt.sentAt, undefined);
+  assert.equal(stored.messagingBinding?.landlord.conversationId, conversationId);
+  await assert.rejects(performCaseAction(f.ownerId, f.caseId, action(), dependencies), /pending or uncertain/);
+  assert.equal(sends, 1);
 });
 
 test("a rejected recipient is recorded as failed without dispatch or advancing case status", async () => {

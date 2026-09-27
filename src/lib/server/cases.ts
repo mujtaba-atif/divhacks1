@@ -19,11 +19,22 @@ import {
   type XrplReceipt,
 } from "@/lib/integrations/xrpl-settlement";
 import { evaluateFinancialBinding, evaluatePolicy, evaluateXrplPolicy, makeIntent, makeXrplIntent } from "@/lib/policy";
-import { demoFinancialProfile } from "@/lib/financial-fixture";
 import { NessieError, resolveFinancialBinding } from "@/lib/integrations/nessie";
-import { getPhotonConfig, isPhotonCaseBound, prepareLandlordMessage } from "@/lib/integrations/photon";
+import { failedFinancialProfile, nessiePolicyContext } from "./nessie-verification";
+import {
+  getPhotonConfig,
+  isPhotonCaseBound,
+  isPhotonParticipantBound,
+  isPhotonDirectConversation,
+  photonBindingChecks,
+  prepareLandlordMessage,
+  prepareParticipantMessage,
+  sendParticipantMessage,
+} from "@/lib/integrations/photon";
+import { buildAgentRelay, buildShortReplyRelay, classifyParticipantMessage } from "@/lib/integrations/messaging-agent";
+import { matchesSpectrumSendingLine, SpectrumLineUncertainError } from "@/lib/integrations/spectrum";
 import { createNewCase } from "@/lib/seed";
-import { normalizeMessagingContact } from "@/lib/messaging-contact";
+import { maskMessagingContact, normalizeMessagingContact } from "@/lib/messaging-contact";
 import type {
   AuditRecord,
   AuthUser,
@@ -33,6 +44,8 @@ import type {
   EvidenceRecord,
   LandlordReplyClassification,
   LandlordReplyIntent,
+  MessagingRole,
+  ParticipantMessageInterpretation,
   PolicyResult,
   TimelineEvent,
   TransactionIntent,
@@ -46,6 +59,7 @@ import {
   assignCaseOwnership,
   findCase,
   mutateSession,
+  readSession,
   updateSharedBalance,
   withXrplWalletLock,
   type SessionDocument,
@@ -55,6 +69,7 @@ import type { newCaseSchema } from "./validation";
 import { assertXrplWalletAvailable, readXrplJournal, recordXrplPending, recordXrplValidated } from "./xrpl-journal";
 import { requireLandlordCaseAccess } from "./case-access";
 import { getBuildingContext } from "./buildings";
+import { proposeXrplAgentSettlement } from "./xrpl-agent";
 
 export type CaseActionResult = { case: CaseRecord; policy?: PolicyResult };
 interface MessagingDependencies {
@@ -62,6 +77,19 @@ interface MessagingDependencies {
   send: typeof sendLandlordMessage;
 }
 const defaultMessaging: MessagingDependencies = { prepare: prepareLandlordMessage, send: sendLandlordMessage };
+
+export interface ParticipantMessagingDependencies {
+  prepare: typeof prepareParticipantMessage;
+  send: typeof sendParticipantMessage;
+  classify: typeof classifyParticipantMessage;
+  relay: typeof buildAgentRelay;
+}
+const defaultParticipantMessaging: ParticipantMessagingDependencies = {
+  prepare: prepareParticipantMessage,
+  send: sendParticipantMessage,
+  classify: classifyParticipantMessage,
+  relay: buildAgentRelay,
+};
 
 function now() { return new Date().toISOString(); }
 
@@ -143,7 +171,8 @@ function messageFailure(caseRecord: CaseRecord, message: CaseMessage, error: unk
   const uncertain = dispatched && (!(error instanceof IntegrationError) || error.code === "uncertain_delivery");
   message.delivery = uncertain ? "uncertain" : "failed";
   message.failureReason = uncertain
-    ? "Delivery could not be confirmed. Check the provider conversation; this attempt will not be retried automatically."
+    ? error instanceof SpectrumLineUncertainError ? error.message
+      : "Delivery could not be confirmed. Check the provider conversation; this attempt will not be retried automatically."
     : error instanceof IntegrationError ? error.message : "The messaging provider could not start this send.";
   event(caseRecord, uncertain ? "Message delivery uncertain" : "Message not sent", message.failureReason, "message");
   updateStatus(caseRecord);
@@ -164,11 +193,12 @@ async function sendApprovedMessage(
   const body = typeof action.body === "string" ? action.body.trim() : "";
   if (!body || body.length > 5_000) throw new ApiError(400, "Messages must contain 1 to 5,000 characters.");
   console.info("Photon send attempt", {
-    caseId: caseRecord.id, tenant: { ownerId: caseRecord.ownerId, ...caseRecord.tenant },
+    caseId: caseRecord.id, tenant: { ownerId: caseRecord.ownerId, name: caseRecord.tenant?.name,
+      phone: maskMessagingContact(caseRecord.tenant?.phone) },
     tenantName: caseRecord.tenantName ?? caseRecord.tenant?.name,
-    landlordName: caseRecord.landlordName, landlordContact: caseRecord.landlordContact,
-    normalizedRecipient: normalizeMessagingContact(caseRecord.landlordContact) ?? null,
-    allowedRecipient: normalizeMessagingContact(process.env.PHOTON_ALLOWED_RECIPIENT) ?? null,
+    landlordName: caseRecord.landlordName, landlordContact: maskMessagingContact(caseRecord.landlordContact),
+    normalizedRecipient: maskMessagingContact(caseRecord.landlordContact),
+    allowedRecipient: maskMessagingContact(process.env.PHOTON_ALLOWED_RECIPIENT),
     provider: process.env.PHOTON_LIVE_SEND === "true" ? "spectrum" : "demo",
   });
   const previous = document.cases.flatMap((item) => item.messages.map((message) => ({ record: item, message })))
@@ -181,6 +211,7 @@ async function sendApprovedMessage(
     id: randomUUID(), sender: "tenant", body, createdAt: now(), attemptedAt: now(),
     delivery: "pending", provider: process.env.PHOTON_LIVE_SEND === "true" ? "spectrum" : "demo",
     caseId: caseRecord.id, recipient, requestId: action.requestId,
+    recipientUserId: caseRecord.messagingBinding?.landlord?.userId,
   };
   let prepared: ReturnType<typeof prepareLandlordMessage>;
   try { prepared = messaging.prepare(caseRecord, body); }
@@ -221,10 +252,90 @@ async function sendApprovedMessage(
     const result = await messaging.send(caseRecord, body);
     Object.assign(attempt, result);
     delete attempt.failureReason;
+    const landlordBinding = caseRecord.messagingBinding?.landlord;
+    if (attempt.delivery === "sent" && landlordBinding && attempt.providerConversationId && attempt.sendingLine) {
+      landlordBinding.conversationId = attempt.providerConversationId;
+      landlordBinding.sendingLine = attempt.sendingLine;
+    }
   } catch (error) { messageFailure(caseRecord, attempt, error, true); }
   event(caseRecord, attempt.delivery === "demo" ? "Notice saved in demo" : "Notice sent", attempt.body, "message");
   updateStatus(caseRecord);
   return { case: caseRecord };
+}
+
+function participantSendFailure(caseRecord: CaseRecord, message: CaseMessage, error: unknown, dispatched: boolean): void {
+  const uncertain = dispatched && (!(error instanceof IntegrationError) || error.code === "uncertain_delivery");
+  message.delivery = uncertain ? "uncertain" : "failed";
+  message.failureReason = uncertain
+    ? error instanceof SpectrumLineUncertainError ? error.message
+      : "Delivery could not be confirmed. Check the provider conversation; this attempt will not be retried automatically."
+    : error instanceof IntegrationError ? error.message : "The messaging provider could not start this send.";
+  event(caseRecord, uncertain ? "Agent relay delivery uncertain" : "Agent relay not sent", message.failureReason, "message");
+}
+
+async function sendAgentParticipantMessage(
+  caseRecord: CaseRecord,
+  role: MessagingRole,
+  body: string,
+  triggerMessageId: string,
+  mutation: SessionMutationContext,
+  messaging: ParticipantMessagingDependencies,
+  originatingAgent: MessagingRole = role,
+): Promise<CaseMessage> {
+  const participant = caseRecord.messagingBinding?.[role];
+  const existing = caseRecord.messages.find((message) => message.sender === "agent"
+    && message.triggerMessageId === triggerMessageId
+    && (!participant || message.recipientUserId === participant.userId));
+  if (existing) return existing;
+  if (caseRecord.messages.length >= 200) throw new ApiError(409, "This case has reached its message limit.");
+  const attempt: CaseMessage = {
+    id: randomUUID(), sender: "agent", originatingAgent, body: body.trim(), createdAt: now(), attemptedAt: now(),
+    delivery: "pending", provider: process.env.PHOTON_LIVE_SEND === "true" ? "spectrum" : "demo",
+    caseId: caseRecord.id, recipient: normalizeMessagingContact(participant?.phone) ?? "",
+    recipientUserId: participant?.userId, triggerMessageId,
+  };
+  try {
+    const { role: _preparedRole, ...prepared } = messaging.prepare(caseRecord, role, body);
+    Object.assign(attempt, prepared);
+  } catch (error) {
+    caseRecord.messages.push(attempt);
+    participantSendFailure(caseRecord, attempt, error, false);
+    return attempt;
+  }
+  caseRecord.messages.push(attempt);
+  event(caseRecord, "Agent relay reserved", "The mediated participant message was recorded before delivery.", "message");
+  await mutation.checkpoint();
+  try {
+    const { role: _resultRole, ...result } = await messaging.send(caseRecord, role, body);
+    Object.assign(attempt, result);
+    delete attempt.failureReason;
+    if (attempt.delivery === "sent" && participant && attempt.providerConversationId && attempt.sendingLine) {
+      participant.conversationId = attempt.providerConversationId;
+      participant.sendingLine = attempt.sendingLine;
+    }
+    event(caseRecord, attempt.delivery === "demo" ? "Agent relay saved in demo" : "Agent relay sent",
+      `The ${role} participant notification was recorded.`, "message");
+  } catch (error) {
+    participantSendFailure(caseRecord, attempt, error, true);
+  }
+  updateStatus(caseRecord);
+  return attempt;
+}
+
+function caseCreationNotice(caseRecord: CaseRecord): string {
+  const tenant = caseRecord.tenantDisplayName ?? caseRecord.tenantName ?? caseRecord.tenant?.name ?? "The tenant";
+  const temperature = [...caseRecord.evidence].reverse().find((item) => item.temperatureF !== undefined)?.temperatureF;
+  const location = `${caseRecord.building.address}${caseRecord.apartment ? `, Apt ${caseRecord.apartment}` : ""}`;
+  return `RentEscrow case ${caseRecord.id}: ${tenant} reported ${caseRecord.title || caseRecord.issue} at ${location}. ${caseRecord.description}`
+    + `${temperature !== undefined ? ` Current evidence includes an indoor reading of ${temperature}°F.` : ""}`
+    + " When can maintenance inspect the unit?";
+}
+
+function canAutoNotifyLandlord(document: SessionDocument, caseRecord: CaseRecord): boolean {
+  const binding = caseRecord.messagingBinding;
+  return Boolean(document.tenantUserId && binding && binding.ownerId === document.ownerId && binding.caseId === caseRecord.id
+    && caseRecord.tenantUserId === binding.tenant.userId && caseRecord.landlordUserId === binding.landlord.userId
+    && caseRecord.case_type !== "self_documentation");
 }
 
 function assertMutable(caseRecord: CaseRecord) {
@@ -291,9 +402,11 @@ function appendXrplAudit(
   options: {
     code?: string; hash?: string; ledgerIndex?: number; result?: string;
     validated?: boolean; signed?: boolean; submitted?: boolean;
+    policy?: PolicyResult; actor?: "tenant" | "settlement_agent";
   } = {},
 ) {
   const settlement = caseRecord.xrplSettlement;
+  const { policy, actor, ...receipt } = options;
   caseRecord.escrow.audit.push({
     id: randomUUID(), action: "Payment", status, createdAt: now(), network: "testnet",
     caseId: caseRecord.id, amountCents: intent.amountUsdCents, source: intent.source,
@@ -301,12 +414,18 @@ function appendXrplAudit(
     requestedAction: intent.requestedAction, requestedTransactionType: intent.transactionType,
     requestedNetwork: intent.network,
     destination: intent.destination, amountDrops: intent.amountDrops,
-    approvedAmountDrops: settlement?.amountDrops, detail, ...options,
+    approvedAmountDrops: settlement?.amountDrops, detail, ...receipt,
+    ...(policy ? { policyDecision: structuredClone(policy) } : {}),
+    ...(actor ? { actor } : {}),
   });
   caseRecord.updatedAt = now();
 }
 
-function applyXrplReceipt(caseRecord: CaseRecord, receipt: XrplReceipt) {
+function applyXrplReceipt(
+  caseRecord: CaseRecord,
+  receipt: XrplReceipt,
+  context: { policy?: PolicyResult; actor?: "tenant" | "settlement_agent" } = {},
+) {
   const settlement = caseRecord.xrplSettlement;
   if (!settlement) throw new ApiError(500, "The XRPL receipt has no case settlement authorization.", false, "XRPL_RECEIPT_MISMATCH");
   if (settlement.status === "validated") {
@@ -330,7 +449,7 @@ function applyXrplReceipt(caseRecord: CaseRecord, receipt: XrplReceipt) {
     && entry.status === "validated" && entry.hash === receipt.hash)) {
     appendXrplAudit(caseRecord, intent, "validated", "Real Test XRP Payment reached a validated tesSUCCESS ledger result.", {
       hash: receipt.hash, ledgerIndex: receipt.ledgerIndex, result: receipt.result,
-      validated: true, signed: true, submitted: true,
+      validated: true, signed: true, submitted: true, ...context,
     });
     event(caseRecord, "XRPL Testnet settlement validated",
       `${receipt.amountDrops} drops reached the authorized recipient. Transaction ${receipt.hash}.`, "escrow");
@@ -343,14 +462,22 @@ function rejectXrplPolicy(
   intent: XrplSettlementIntent,
   policy: PolicyResult,
   explicitCode?: string,
+  actor?: "tenant" | "settlement_agent",
 ): never {
   const code = explicitCode ?? failedPolicyCode(policy);
   const detail = policyReason(policy);
-  appendXrplAudit(caseRecord, intent, "rejected", detail, { code, signed: false, submitted: false });
+  appendXrplAudit(caseRecord, intent, "rejected", detail, {
+    code, signed: false, submitted: false, policy, actor,
+  });
   throw new ApiError(409, detail, true, code, policy, caseRecord);
 }
 
-function throwXrplError(caseRecord: CaseRecord, intent: XrplSettlementIntent, error: unknown): never {
+function throwXrplError(
+  caseRecord: CaseRecord,
+  intent: XrplSettlementIntent,
+  error: unknown,
+  context: { policy?: PolicyResult; actor?: "tenant" | "settlement_agent" } = {},
+): never {
   const settlement = caseRecord.xrplSettlement;
   const xrplError = error instanceof XrplError ? error : undefined;
   const code = xrplError?.reason || "XRPL_EXECUTION_FAILED";
@@ -366,9 +493,9 @@ function throwXrplError(caseRecord: CaseRecord, intent: XrplSettlementIntent, er
     }
   }
   appendXrplAudit(caseRecord, intent, xrplError?.policy && !xrplError.policy.approved ? "rejected" : "failed",
-    detail, { code, hash: xrplError?.submittedHash, signed: pending || Boolean(xrplError?.submittedHash),
+    detail, { code, hash: xrplError?.submittedHash, signed: xrplError?.signed === true || pending || Boolean(xrplError?.submittedHash),
       submitted: Boolean(xrplError?.submittedHash), validated: Boolean(xrplError?.ledgerResult),
-      result: xrplError?.ledgerResult });
+      result: xrplError?.ledgerResult, policy: xrplError?.policy ?? context.policy, actor: context.actor });
   const temporarilyUnavailable = ["XRPL_VALIDATION_PENDING", "XRPL_SUBMISSION_UNCERTAIN", "XRPL_UNAVAILABLE"]
     .includes(code);
   throw new ApiError(temporarilyUnavailable ? 503 : 409, detail, true,
@@ -416,13 +543,10 @@ async function refreshFinancialProfile(caseRecord: CaseRecord): Promise<void> {
     caseRecord.expenses = caseRecord.expenses.filter((item) => item.source !== "nessie" || !!item.transactionId);
   } catch (error) {
     if (!(error instanceof NessieError)) throw error;
-    let binding = previous?.binding ?? demoFinancialProfile(caseRecord.ownerId, caseRecord.id).binding;
-    try { binding = resolveFinancialBinding(caseRecord); } catch { /* Retain the rejected binding for inspection. */ }
-    caseRecord.financialProfile = {
-      binding, status: ["NESSIE_NOT_CONFIGURED", "NESSIE_API_UNAVAILABLE"].includes(error.reasonCode) ? "unavailable" : "rejected",
-      reasonCode: error.reasonCode, detail: error.message, checkedAt: new Date().toISOString(),
-      customerVerified: false, accountVerified: false, ownershipVerified: false, transactions: previous?.transactions ?? [],
-    };
+    caseRecord.financialProfile = failedFinancialProfile(caseRecord, error);
+  }
+  if (caseRecord.financialProfile?.binding.source === "nessie") {
+    caseRecord.financialPolicyContext = nessiePolicyContext(caseRecord);
   }
 }
 
@@ -438,15 +562,23 @@ function simulateSigningBoundary(caseRecord: CaseRecord, intent: Readonly<Transa
   return `DEMO-${randomBytes(24).toString("hex").toUpperCase()}`;
 }
 
-export async function createCase(ownerId: string, input: z.infer<typeof newCaseSchema>) {
+export async function createCase(
+  ownerId: string,
+  input: z.infer<typeof newCaseSchema>,
+  messaging: ParticipantMessagingDependencies = defaultParticipantMessaging,
+) {
   const building = { ...await getBuildingContext(input.address, input.borough), address: input.address, borough: input.borough };
-  return mutateSession(ownerId, async (document) => {
+  return mutateSession(ownerId, async (document, mutation) => {
     await assertSessionNoPendingSettlement(document);
     if (document.cases.length >= 20) throw new ApiError(409, "This demo allows up to 20 cases per session.");
     const caseRecord = assignDemoParticipants(createNewCase(ownerId, { ...input, building }));
     assignCaseOwnership(document, caseRecord);
     caseRecord.accountBalanceCents = document.accountBalanceCents;
     document.cases.push(caseRecord);
+    if (canAutoNotifyLandlord(document, caseRecord)) {
+      await sendAgentParticipantMessage(caseRecord, "landlord", caseCreationNotice(caseRecord),
+        `case-created:${caseRecord.id}`, mutation, messaging, "tenant");
+    }
     return caseRecord;
   });
 }
@@ -466,12 +598,13 @@ export async function createContractCase(
       throw new ApiError(409, "A fully accepted unused contract is required before creating a case.");
     }
     const caseRecord = createNewCase(ownerId, { ...input, building });
-    assignCaseOwnership(document, caseRecord);
     caseRecord.case_type = contract.case_type;
+    assignCaseOwnership(document, caseRecord);
     if (contract.case_type === "self_documentation") {
       // No destination wallet is recorded or approved for a tenant-only case.
       caseRecord.escrow.destination = "";
       delete caseRecord.landlordUserId;
+      delete caseRecord.messagingBinding;
     }
     caseRecord.accountBalanceCents = document.accountBalanceCents;
     document.cases.push(caseRecord);
@@ -564,12 +697,32 @@ export async function addLandlordEvidence(ownerId: string, caseId: string, user:
   });
 }
 
+async function requestAgentSettlementIfEligible(
+  document: SessionDocument,
+  caseRecord: CaseRecord,
+  mutation: SessionMutationContext,
+  messaging: MessagingDependencies,
+): Promise<CaseActionResult | null> {
+  const request = proposeXrplAgentSettlement(caseRecord);
+  if (!request) return null;
+
+  // Reserve the only autonomous request before any financial refresh or ledger
+  // access. A denied or interrupted attempt therefore cannot be auto-retried.
+  caseRecord.xrplSettlement!.agentRequestedAt = now();
+  event(caseRecord, "XRPL settlement agent requested payment",
+    "The authorized agent requested the server-owned settlement action. Wallet, amount, network, transaction type and signing credentials remain pinned by the server.",
+    "escrow");
+  await mutation.checkpoint();
+  return applyAction(document, caseRecord, request, mutation, messaging, "settlement_agent");
+}
+
 async function applyAction(
   document: SessionDocument,
   caseRecord: CaseRecord,
   action: CaseAction,
   mutation: SessionMutationContext,
   messaging: MessagingDependencies,
+  settlementActor?: "tenant" | "settlement_agent",
 ): Promise<CaseActionResult> {
   if (action.action === "xrpl_security_demo") {
     if (!caseRecord.xrplSettlement) {
@@ -595,7 +748,7 @@ async function applyAction(
     appendXrplAudit(caseRecord, demonstration.intent, status,
       `Security demo only. ${demonstration.detail}`, {
         code: demonstration.policy.approved ? undefined : scenarioCode[action.scenario],
-        signed: false, submitted: false,
+        signed: false, submitted: false, policy: demonstration.policy,
       });
     event(caseRecord, demonstration.policy.approved ? "XRPL security check passed" : "XRPL attack blocked",
       demonstration.detail, "escrow");
@@ -614,14 +767,19 @@ async function applyAction(
       // Refresh trusted customer/account ownership at the last server boundary before policy and signing.
       // The adapter rechecks the resulting immutable snapshot immediately before it signs.
       await refreshFinancialProfile(caseRecord);
+      // Autonomous settlement requires live financial verification, even in an otherwise explicit demo workspace.
+      if (settlementActor === "settlement_agent") caseRecord.financialPolicyContext = nessiePolicyContext(caseRecord);
     }
     return withXrplWalletLock(settlement.source, async () => {
       const journal = await readXrplJournal(settlement);
       if (journal?.status === "validated" && journal.receipt) {
-        applyXrplReceipt(caseRecord, journal.receipt);
+        applyXrplReceipt(caseRecord, journal.receipt, {
+          policy: journal.pending.policyDecision,
+          actor: journal.pending.actor ?? settlementActor,
+        });
         const duplicatePolicy = evaluateXrplPolicy(caseRecord, makeXrplIntent(caseRecord), document.ownerId);
         rejectXrplPolicy(caseRecord, makeXrplIntent(caseRecord), duplicatePolicy,
-          "SETTLEMENT_ALREADY_COMPLETED");
+          "SETTLEMENT_ALREADY_COMPLETED", settlementActor);
       }
       if (journal?.status === "pending") {
         Object.assign(settlement, {
@@ -630,20 +788,24 @@ async function applyAction(
           detail: "A durable pending transaction must be reconciled before any signing retry.",
         });
         const pendingPolicy = evaluateXrplPolicy(caseRecord, makeXrplIntent(caseRecord), document.ownerId);
-        rejectXrplPolicy(caseRecord, makeXrplIntent(caseRecord), pendingPolicy, "SETTLEMENT_PENDING");
+        rejectXrplPolicy(caseRecord, makeXrplIntent(caseRecord), pendingPolicy, "SETTLEMENT_PENDING", settlementActor);
       }
       await assertXrplWalletAvailable(settlement.source);
       const intent = Object.freeze(makeXrplIntent(caseRecord));
       const policy = evaluateXrplPolicy(caseRecord, intent, document.ownerId);
-      if (!policy.approved) rejectXrplPolicy(caseRecord, intent, policy);
+      if (!policy.approved) rejectXrplPolicy(caseRecord, intent, policy, undefined, settlementActor);
       let persistedPending: XrplPending | undefined;
       try {
         const receipt = await executeXrplSettlement({
           ownerId: document.ownerId,
+          actor: settlementActor ?? "tenant",
           loadCase: async () => structuredClone(caseRecord),
           beforeSubmit: async (pending) => {
             const finalPolicy = evaluateXrplPolicy(caseRecord, pending.intent, document.ownerId);
-            if (!finalPolicy.approved) rejectXrplPolicy(caseRecord, pending.intent, finalPolicy);
+            // Signing already happened. A time-sensitive check can expire here;
+            // do not emit the pre-sign rejection audit or dispatch this blob.
+            if (!finalPolicy.approved) throw new XrplError(failedPolicyCode(finalPolicy), policyReason(finalPolicy),
+              finalPolicy, undefined, undefined, true);
             await recordXrplPending(settlement, pending);
             persistedPending = pending;
             Object.assign(settlement, {
@@ -661,11 +823,18 @@ async function applyAction(
             "XRPL_JOURNAL_MISMATCH");
         }
         await recordXrplValidated(settlement, persistedPending, receipt);
-        applyXrplReceipt(caseRecord, receipt);
-        return { case: caseRecord, policy };
+        const finalPolicy = persistedPending.policyDecision ?? policy;
+        applyXrplReceipt(caseRecord, receipt, {
+          policy: finalPolicy,
+          actor: persistedPending.actor ?? settlementActor,
+        });
+        return { case: caseRecord, policy: finalPolicy };
       } catch (error) {
         if (error instanceof ApiError) throw error;
-        throwXrplError(caseRecord, intent, error);
+        throwXrplError(caseRecord, intent, error, {
+          policy: persistedPending?.policyDecision ?? policy,
+          actor: persistedPending?.actor ?? settlementActor,
+        });
       }
     });
   }
@@ -675,7 +844,10 @@ async function applyAction(
     return withXrplWalletLock(settlement.source, async () => {
       const journal = await readXrplJournal(settlement);
       if (journal?.status === "validated" && journal.receipt) {
-        applyXrplReceipt(caseRecord, journal.receipt);
+        applyXrplReceipt(caseRecord, journal.receipt, {
+          policy: journal.pending.policyDecision,
+          actor: journal.pending.actor,
+        });
         return { case: caseRecord };
       }
       if (!journal || journal.status !== "pending") {
@@ -697,11 +869,17 @@ async function applyAction(
           },
         }, journal.pending);
         await recordXrplValidated(settlement, journal.pending, receipt);
-        applyXrplReceipt(caseRecord, receipt);
+        applyXrplReceipt(caseRecord, receipt, {
+          policy: journal.pending.policyDecision,
+          actor: journal.pending.actor,
+        });
         return { case: caseRecord };
       } catch (error) {
         if (error instanceof ApiError) throw error;
-        throwXrplError(caseRecord, intent, error);
+        throwXrplError(caseRecord, intent, error, {
+          policy: journal.pending.policyDecision,
+          actor: journal.pending.actor,
+        });
       }
     });
   }
@@ -813,10 +991,13 @@ async function applyAction(
       if (!caseRecord.repairReported || !caseRecord.verification?.verified) {
         throw new ApiError(409, "The repair must pass evidence verification before you confirm resolution.");
       }
-      if (caseRecord.tenantConfirmed) return { case: caseRecord };
-      caseRecord.tenantConfirmed = true;
-      updateStatus(caseRecord);
-      event(caseRecord, "Tenant confirmed resolution", "The tenant confirmed that the reported issue has been resolved. Escrow release remains a separate action.", "verification");
+      if (!caseRecord.tenantConfirmed) {
+        caseRecord.tenantConfirmed = true;
+        updateStatus(caseRecord);
+        event(caseRecord, "Tenant confirmed resolution", "The tenant confirmed that the reported issue has been resolved. Escrow release remains a separate action.", "verification");
+      }
+      const agentResult = await requestAgentSettlementIfEligible(document, caseRecord, mutation, messaging);
+      if (agentResult) return agentResult;
       break;
     }
     case "release_escrow": {
@@ -833,7 +1014,7 @@ async function applyAction(
         };
         appendXrplAudit(caseRecord, intent, "rejected",
           "The simulated USD escrow cannot be released while its enabled XRPL settlement is unvalidated.", {
-            code: "XRPL_SETTLEMENT_REQUIRED", signed: false, submitted: false,
+            code: "XRPL_SETTLEMENT_REQUIRED", signed: false, submitted: false, policy,
           });
         throw new ApiError(409,
           "Complete and validate the XRPL Testnet settlement before releasing this enabled escrow.",
@@ -852,7 +1033,32 @@ async function applyAction(
       return { case: caseRecord, policy };
     }
     case "enable_xrpl": {
-      if (caseRecord.xrplSettlement) return { case: caseRecord };
+      const existing = caseRecord.xrplSettlement;
+      if (existing) {
+        // Old unsubmitted authorizations can explicitly refresh participant binding.
+        // Never rewrite an existing transaction or silently change its payment terms.
+        if (existing.status === "ready" && !existing.hash && !existing.tenantUserId
+          && !existing.landlordUserId && !existing.landlordWallet && !await readXrplJournal(existing)) {
+          let pinned;
+          try { pinned = createXrplSettlement(caseRecord); }
+          catch (error) {
+            if (error instanceof XrplError) throw new ApiError(409, error.message, false, error.reason);
+            throw error;
+          }
+          if (existing.source !== pinned.source || existing.destination !== pinned.destination
+            || existing.amountDrops !== pinned.amountDrops || existing.amountUsdCents !== pinned.amountUsdCents
+            || existing.ownerId !== pinned.ownerId || existing.caseId !== pinned.caseId
+            || existing.escrowId !== pinned.escrowId || existing.network !== pinned.network
+            || existing.transactionType !== pinned.transactionType) {
+            throw new ApiError(409, "The original settlement terms changed; participant refresh cannot replace them.", false, "XRPL_CONFIG_CHANGED");
+          }
+          Object.assign(existing, { tenantUserId: pinned.tenantUserId, landlordUserId: pinned.landlordUserId,
+            landlordWallet: pinned.landlordWallet });
+          event(caseRecord, "XRPL participant authorization refreshed",
+            "Trusted case participants were pinned to the original, unchanged payment permission. Nothing signed. Nothing submitted.", "escrow");
+        }
+        return { case: caseRecord };
+      }
       if (caseRecord.escrow.status !== "locked") {
         throw new ApiError(409, "Fund the simulated USD escrow before enabling its XRPL settlement.", false,
           "ESCROW_NOT_FUNDED");
@@ -868,6 +1074,26 @@ async function applyAction(
       event(caseRecord, "XRPL Testnet settlement enabled",
         `${caseRecord.xrplSettlement.amountDrops} drops are pinned to the authorized source and recipient for this case.`,
         "escrow");
+      break;
+    }
+    case "authorize_xrpl_agent": {
+      const settlement = caseRecord.xrplSettlement;
+      if (!settlement) {
+        throw new ApiError(409, "Enable XRPL Testnet settlement before authorizing its settlement agent.", false,
+          "XRPL_NOT_ENABLED");
+      }
+      if (settlement.status !== "ready" || settlement.hash) {
+        throw new ApiError(409, "Only a ready, never-submitted XRPL settlement can authorize the settlement agent.",
+          false, settlement.status === "failed" ? "XRPL_AGENT_RETRY_BLOCKED" : "XRPL_AGENT_NOT_READY");
+      }
+      if (!settlement.agentAuthorizedAt) {
+        settlement.agentAuthorizedAt = now();
+        event(caseRecord, "XRPL settlement agent authorized",
+          "The tenant authorized one autonomous settlement request after all server-owned case conditions pass.",
+          "escrow");
+      }
+      const agentResult = await requestAgentSettlementIfEligible(document, caseRecord, mutation, messaging);
+      if (agentResult) return agentResult;
       break;
     }
     case "add_expense": {
@@ -939,7 +1165,7 @@ async function applyAction(
   return { case: caseRecord };
 }
 
-export interface IncomingLandlordMessage {
+export interface IncomingParticipantMessage {
   id: string;
   conversationId: string;
   sender: string;
@@ -949,20 +1175,318 @@ export interface IncomingLandlordMessage {
   replyToMessageId?: string;
 }
 
-/** Server worker only: its authenticated SDK stream must already exclude outbound and group messages. */
-export async function receiveLandlordMessage(ownerId: string, caseId: string | undefined, incoming: IncomingLandlordMessage) {
-  const config = getPhotonConfig();
-  if (!config || ownerId !== config.tenantId) {
-    throw new ApiError(403, "The incoming message is not bound to the configured tenant and case.", false, "MESSAGE_BINDING_REJECTED");
+export type IncomingLandlordMessage = IncomingParticipantMessage;
+
+export type PhotonBindingDiagnostic = ReturnType<typeof photonBindingChecks> & {
+  caseId: string;
+  senderRole: MessagingRole;
+  configuredCaseMatch: boolean;
+  workspaceOwnerMatch: boolean;
+  workspaceTenantUserIdMatch: boolean;
+  workspaceLandlordUserIdMatch: boolean;
+  senderPhoneMatch: boolean;
+  sendingLineMatch: boolean;
+  conversationMatch: boolean;
+  conversationBindingExists: boolean;
+  firstConversationAllowed: boolean;
+  knownRouteExists: boolean;
+  quoteMatch: boolean;
+  timestampMatch: boolean;
+};
+
+export class PhotonCaseBindingRejectedError extends ApiError {
+  constructor(public readonly reason: "workspace_mismatch" | "unapproved_sender" | "no_matching_conversation" | "ambiguous_conversation",
+    public readonly diagnostics: PhotonBindingDiagnostic[] = []) {
+    super(403, "No unambiguous approved participant conversation matches this reply.", false, "MESSAGE_BINDING_REJECTED");
   }
+}
+
+export interface ParticipantReceiveResult {
+  case: CaseRecord;
+  processing: {
+    caseId: string;
+    providerEventId: string;
+    inboundMessageId: string;
+    role: MessagingRole;
+    senderMasked: string;
+    duplicate: boolean;
+    intent?: ParticipantMessageInterpretation["intent"];
+    interpretationSource?: ParticipantMessageInterpretation["source"];
+    eventType?: NonNullable<CaseRecord["messagingEvents"]>[number]["type"];
+    caseStateUpdated: boolean;
+    relay: {
+      role: MessagingRole;
+      generated: boolean;
+      attempted: boolean;
+      recipientMasked: string;
+      status: CaseMessage["delivery"] | "not_required";
+      conversation: "reused" | "cold-start-created" | "reuse-requested" | "cold-start-requested" | "not-started";
+      providerMessageId?: string;
+      reason?: string;
+    };
+  };
+}
+
+function participantReceiveResult(record: CaseRecord, message: CaseMessage, role: MessagingRole,
+  duplicate: boolean, caseStateUpdated: boolean, relay: CaseMessage | undefined,
+  attempted: boolean, hadConversation: boolean): ParticipantReceiveResult {
+  const recipientRole = role === "landlord" ? "tenant" : "landlord";
+  const participant = record.messagingBinding?.[recipientRole];
+  const confirmed = relay?.delivery === "sent";
+  return { case: record, processing: {
+    caseId: record.id, providerEventId: message.providerMessageId!, inboundMessageId: message.id,
+    role, senderMasked: maskMessagingContact(record.messagingBinding?.[role]?.phone), duplicate,
+    intent: message.interpretation?.intent, interpretationSource: message.interpretation?.source,
+    eventType: record.messagingEvents?.find((item) => item.messageId === message.id)?.type,
+    caseStateUpdated,
+    relay: { role: recipientRole, generated: Boolean(relay), attempted,
+      recipientMasked: maskMessagingContact(participant?.phone), status: relay?.delivery ?? "not_required",
+      conversation: !attempted ? "not-started" : hadConversation
+        ? confirmed ? "reused" : "reuse-requested" : confirmed ? "cold-start-created" : "cold-start-requested",
+      providerMessageId: relay?.providerMessageId,
+      reason: relay?.failureReason ?? (!relay ? "No relay required for this processed event." : undefined),
+    },
+  } };
+}
+
+function validateIncomingParticipantMessage(incoming: IncomingParticipantMessage): string {
   const body = typeof incoming.body === "string" ? incoming.body.trim() : "";
-  const validIdentifier = (value: unknown) => typeof value === "string" && value.length > 0 && value.length <= 500 && !/[\u0000-\u001f\u007f]/.test(value);
+  const validIdentifier = (value: unknown) => typeof value === "string" && value.length > 0 && value.length <= 500
+    && !/[\u0000-\u001f\u007f]/.test(value);
   if (!validIdentifier(incoming.id) || !validIdentifier(incoming.conversationId) || !body || body.length > 5_000
     || (incoming.replyToMessageId !== undefined && !validIdentifier(incoming.replyToMessageId))
     || typeof incoming.createdAt !== "string" || !Number.isFinite(Date.parse(incoming.createdAt))
     || Date.parse(incoming.createdAt) > Date.now() + 5 * 60_000) {
     throw new ApiError(400, "The incoming message has invalid provider metadata.", false, "MESSAGE_INVALID_EVENT");
   }
+  return body;
+}
+
+function appendMessagingEvent(
+  caseRecord: CaseRecord,
+  message: CaseMessage,
+  interpretation: ParticipantMessageInterpretation,
+  type: NonNullable<CaseRecord["messagingEvents"]>[number]["type"],
+): void {
+  const events = caseRecord.messagingEvents ??= [];
+  if (events.some((item) => item.messageId === message.id && item.type === type)) return;
+  if (events.length >= 200) throw new ApiError(409, "This case has reached its messaging event limit.");
+  events.push({ id: randomUUID(), type, actor: message.sender === "landlord" ? "landlord" : "tenant",
+    messageId: message.id, createdAt: message.createdAt, summary: interpretation.summary,
+    ...(interpretation.scheduledFor ? { scheduledFor: interpretation.scheduledFor } : {}) });
+}
+
+function applyParticipantInterpretation(
+  caseRecord: CaseRecord,
+  role: MessagingRole,
+  message: CaseMessage,
+  interpretation: ParticipantMessageInterpretation,
+): boolean {
+  message.interpretation = interpretation;
+  let shouldRelay = true;
+  const scheduledFor = interpretation.scheduledFor?.trim();
+  const schedule = (status: NonNullable<CaseRecord["maintenanceSchedule"]>["status"]) => {
+    if (!scheduledFor || scheduledFor.length > 80) return false;
+    const previousAt = Date.parse(caseRecord.maintenanceSchedule?.updatedAt ?? "");
+    const incomingAt = Date.parse(message.createdAt);
+    if (Number.isFinite(previousAt) && Number.isFinite(incomingAt) && incomingAt < previousAt) return false;
+    caseRecord.maintenanceSchedule = { scheduledFor, status, updatedAt: message.createdAt, sourceMessageId: message.id };
+    return true;
+  };
+  if (role === "landlord") {
+    if ((interpretation.intent === "scheduled" || interpretation.intent === "rescheduled") && scheduledFor) {
+      const applied = schedule("scheduled");
+      appendMessagingEvent(caseRecord, message, interpretation,
+        interpretation.intent === "scheduled" ? "MAINTENANCE_SCHEDULED" : "MAINTENANCE_RESCHEDULED");
+      if (applied) {
+        (caseRecord.repairs ??= []).push({ id: randomUUID(), caseId: caseRecord.id,
+          landlordUserId: message.participantUserId ?? caseRecord.landlordUserId ?? "unknown",
+          kind: "scheduled", createdAt: message.createdAt, notes: interpretation.summary, scheduledFor });
+      } else shouldRelay = false;
+    } else if (interpretation.intent === "repair_complete") {
+      appendMessagingEvent(caseRecord, message, interpretation, "REPAIR_REPORTED_COMPLETE");
+      if (!caseRecord.repairReported) {
+        caseRecord.repairReported = true;
+        (caseRecord.repairs ??= []).push({ id: randomUUID(), caseId: caseRecord.id,
+          landlordUserId: message.participantUserId ?? caseRecord.landlordUserId ?? "unknown",
+          kind: "reported_complete", createdAt: message.createdAt, notes: interpretation.summary });
+      }
+    } else if (interpretation.intent === "repair_update") {
+      appendMessagingEvent(caseRecord, message, interpretation, "REPAIR_UPDATE");
+    }
+  } else if (interpretation.intent === "reschedule_request") {
+    if (scheduledFor && !schedule("reschedule_requested")) shouldRelay = false;
+    appendMessagingEvent(caseRecord, message, interpretation, "RESCHEDULE_REQUESTED");
+  } else if (interpretation.intent === "schedule_confirmed") {
+    if (scheduledFor && !schedule("confirmed")) shouldRelay = false;
+    appendMessagingEvent(caseRecord, message, interpretation, "SCHEDULE_CONFIRMED");
+  } else if (interpretation.intent === "no_show") {
+    if (caseRecord.maintenanceSchedule && Date.parse(message.createdAt) >= Date.parse(caseRecord.maintenanceSchedule.updatedAt)) {
+      caseRecord.maintenanceSchedule = { ...caseRecord.maintenanceSchedule, status: "no_show",
+        updatedAt: message.createdAt, sourceMessageId: message.id };
+    } else if (caseRecord.maintenanceSchedule) shouldRelay = false;
+    appendMessagingEvent(caseRecord, message, interpretation, "MAINTENANCE_NO_SHOW");
+  } else if (interpretation.intent === "unresolved") {
+    appendMessagingEvent(caseRecord, message, interpretation, "CONDITION_UNRESOLVED");
+  }
+  // Messaging can record repair coordination only. It never clears or grants tenant confirmation or verification.
+  updateStatus(caseRecord);
+  event(caseRecord, "Participant message interpreted", interpretation.summary, "message");
+  return shouldRelay;
+}
+
+/** Authenticated Spectrum worker entry point. Case routing is derived only from persisted participant bindings. */
+export async function receiveParticipantMessage(
+  ownerId: string,
+  incoming: IncomingParticipantMessage,
+  messaging: ParticipantMessagingDependencies = defaultParticipantMessaging,
+): Promise<ParticipantReceiveResult> {
+  const config = getPhotonConfig();
+  if (!config || ownerId !== config.tenantId) {
+    throw new PhotonCaseBindingRejectedError("workspace_mismatch");
+  }
+  const body = validateIncomingParticipantMessage(incoming);
+  const sender = normalizeMessagingContact(incoming.sender);
+  const senderRole: MessagingRole | undefined = sender === config.tenantPhone ? "tenant"
+    : sender === config.allowedRecipient ? "landlord" : undefined;
+  if (!sender || !senderRole) throw new PhotonCaseBindingRejectedError("unapproved_sender");
+  return mutateSession(ownerId, async (document, mutation) => {
+    const candidates: { record: CaseRecord; role: MessagingRole;
+      participant: NonNullable<CaseRecord["messagingBinding"]>[MessagingRole]; earliestAllowedAt: number }[] = [];
+    const diagnostics: PhotonBindingDiagnostic[] = [];
+    // A known route anywhere in this workspace must not be reassigned to a
+    // different case just because its ID appears in the configured seed slot.
+    const knownRouteExists = document.cases.some((record) =>
+      (["tenant", "landlord"] as const).some((role) => {
+        const participant = record.messagingBinding?.[role];
+        return normalizeMessagingContact(participant?.phone) === sender && Boolean(participant?.conversationId);
+      }) || record.messages.some((message) => message.provider === "spectrum" && message.delivery === "sent"
+        && (message.sender === "agent" || message.sender === "tenant")
+        && normalizeMessagingContact(message.recipient) === sender && Boolean(message.providerConversationId)));
+    for (const record of document.cases) {
+      for (const role of [senderRole]) {
+        const participant = record.messagingBinding?.[role];
+        const bindingChecks = photonBindingChecks(record, config);
+        const workspaceOwnerMatch = document.ownerId === ownerId && record.ownerId === document.ownerId;
+        const workspaceTenantUserIdMatch = !document.tenantUserId || record.tenantUserId === document.tenantUserId;
+        const workspaceLandlordUserIdMatch = !document.managedProperty || record.landlordUserId === document.managedProperty.landlordUserId;
+        const senderPhoneMatch = normalizeMessagingContact(participant?.phone) === sender;
+        const sendingLineMatch = (!participant?.sendingLine || incoming.sendingLine === participant.sendingLine)
+          && matchesSpectrumSendingLine(incoming.sendingLine, config.sendingLine);
+        const matchingOutbound = record.messages.filter((message) => (message.sender === "agent" || (role === "landlord" && message.sender === "tenant"))
+          && message.provider === "spectrum" && message.delivery === "sent"
+          && ((participant && message.recipientUserId === participant.userId) || normalizeMessagingContact(message.recipient) === sender)
+          && message.providerConversationId === incoming.conversationId && message.sendingLine === incoming.sendingLine
+          && (!incoming.replyToMessageId || message.providerMessageId === incoming.replyToMessageId));
+        const conversationMatch = participant?.conversationId === incoming.conversationId || matchingOutbound.length > 0;
+        // The authenticated SDK event may be the first proof of this participant's
+        // DM. Restrict this to the configured case, both trusted identities, the
+        // configured route, and a canonical DM addressed to the exact sender.
+        const firstConversationAllowed = record.id === config.caseId && !knownRouteExists
+          && !participant?.conversationId && !incoming.replyToMessageId
+          && isPhotonDirectConversation(incoming.conversationId, sender)
+          && isPhotonParticipantBound(record, "tenant", config) && isPhotonParticipantBound(record, "landlord", config);
+        const quoteMatch = !incoming.replyToMessageId || matchingOutbound.length > 0;
+        const anchorTimes = matchingOutbound.map((message) => Date.parse(message.sentAt ?? message.createdAt))
+          .filter(Number.isFinite);
+        const earliestAllowedAt = anchorTimes.length ? Math.min(...anchorTimes) : Date.parse(record.createdAt);
+        const timestampMatch = Number.isFinite(earliestAllowedAt) && Date.parse(incoming.createdAt) >= earliestAllowedAt;
+        diagnostics.push({ caseId: record.id, senderRole: role, ...bindingChecks, configuredCaseMatch: record.id === config.caseId,
+          workspaceOwnerMatch, workspaceTenantUserIdMatch, workspaceLandlordUserIdMatch, senderPhoneMatch, sendingLineMatch,
+          conversationMatch, conversationBindingExists: Boolean(participant?.conversationId), firstConversationAllowed,
+          knownRouteExists, quoteMatch, timestampMatch });
+        if (!participant || !workspaceOwnerMatch || !workspaceTenantUserIdMatch || !workspaceLandlordUserIdMatch
+          || !senderPhoneMatch || !sendingLineMatch || !isPhotonParticipantBound(record, role, config)
+          || (!conversationMatch && !firstConversationAllowed) || !quoteMatch || !timestampMatch) continue;
+        candidates.push({ record, role, participant, earliestAllowedAt });
+      }
+    }
+    if (candidates.length !== 1) {
+      throw new PhotonCaseBindingRejectedError(candidates.length > 1 ? "ambiguous_conversation" : "no_matching_conversation", diagnostics);
+    }
+    const { record: caseRecord, role, participant } = candidates[0];
+    const recipientRole: MessagingRole = role === "landlord" ? "tenant" : "landlord";
+    const hadConversation = Boolean(caseRecord.messagingBinding?.[recipientRole]?.conversationId);
+    const existing = document.cases.flatMap((record) => record.messages.map((message) => ({ record, message })))
+      .find(({ message }) => message.provider === "spectrum" && message.providerMessageId === incoming.id);
+    let message: CaseMessage;
+    if (existing) {
+      if (existing.record.id !== caseRecord.id || existing.message.sender !== role || existing.message.body !== body
+        || existing.message.providerConversationId !== incoming.conversationId
+        || existing.message.participantUserId !== participant.userId) {
+        throw new ApiError(409, "The provider message ID is already bound to different content.", false, "MESSAGE_EVENT_CONFLICT");
+      }
+      message = existing.message;
+      // A migrated event may predate its participant route. Pin only after
+      // verifying that its provider ID belongs to this exact participant/event.
+      participant.conversationId ??= incoming.conversationId;
+      if (incoming.sendingLine) participant.sendingLine ??= incoming.sendingLine;
+      const relay = caseRecord.messages.find((item) => item.sender === "agent" && item.triggerMessageId === message.id);
+      if (relay) {
+        if (relay?.delivery === "pending") {
+          relay.delivery = "uncertain";
+          relay.failureReason = "A reserved relay was interrupted before delivery could be confirmed. Inspect the provider conversation; it will not be retried automatically.";
+          event(caseRecord, "Agent relay delivery uncertain", relay.failureReason, "message");
+        }
+        return participantReceiveResult(caseRecord, message, role, true, false, relay, false, hadConversation);
+      }
+      await assertSessionNoPendingSettlement(document);
+      assertMutable(caseRecord);
+    } else {
+      await assertSessionNoPendingSettlement(document);
+      assertMutable(caseRecord);
+      if (caseRecord.messages.length >= 200) throw new ApiError(409, "This case has reached its message limit.");
+      message = { id: randomUUID(), sender: role, participantUserId: participant.userId,
+        recipientUserId: caseRecord.messagingBinding?.[role === "tenant" ? "landlord" : "tenant"]?.userId,
+        body, createdAt: new Date(incoming.createdAt).toISOString(), delivery: "received", provider: "spectrum",
+        caseId: caseRecord.id, providerMessageId: incoming.id,
+        providerConversationId: incoming.conversationId, sendingLine: incoming.sendingLine };
+      caseRecord.messages.push(message);
+      participant.conversationId ??= incoming.conversationId;
+      if (incoming.sendingLine) participant.sendingLine ??= incoming.sendingLine;
+      event(caseRecord, "Participant message received", `A bound ${role} message was recorded for interpretation.`, "message");
+      // The original provider event is durable before any model call or relay reservation.
+      await mutation.checkpoint();
+    }
+    let shouldRelay = message.relayRequired !== false;
+    let caseStateUpdated = false;
+    const shortReplyRelay = buildShortReplyRelay(body, role, caseRecord);
+    // A stored inbound/interpretation alone is not proof that a relay was ever
+    // reserved. Recover old `other` records through the corrected classifier;
+    // known interpretations already applied to the case must not be applied twice.
+    if (!message.processedAt) {
+      const previous = message.interpretation;
+      if (!previous || previous.intent === "other") {
+        const before = JSON.stringify([caseRecord.maintenanceSchedule, caseRecord.repairReported, caseRecord.messagingEvents?.length]);
+        const interpretation = await messaging.classify(body, role, caseRecord, new Date(incoming.createdAt));
+        shouldRelay = applyParticipantInterpretation(caseRecord, role, message, interpretation);
+        caseStateUpdated = before !== JSON.stringify([caseRecord.maintenanceSchedule, caseRecord.repairReported, caseRecord.messagingEvents?.length]);
+      } else if (["scheduled", "rescheduled", "reschedule_request", "schedule_confirmed", "no_show"].includes(previous.intent)
+        && caseRecord.maintenanceSchedule
+        && Date.parse(message.createdAt) < Date.parse(caseRecord.maintenanceSchedule.updatedAt)) {
+        shouldRelay = false;
+      }
+    }
+    const relayBody = shouldRelay && message.interpretation
+      ? shortReplyRelay ?? messaging.relay(role, message.interpretation, caseRecord.id) : undefined;
+    message.processedAt ??= now();
+    message.relayRequired = Boolean(relayBody);
+    let relay: CaseMessage | undefined;
+    if (relayBody) {
+      relay = await sendAgentParticipantMessage(caseRecord, recipientRole, relayBody, message.id, mutation, messaging);
+    }
+    return participantReceiveResult(caseRecord, message, role, Boolean(existing), caseStateUpdated,
+      relay, Boolean(relayBody), hadConversation);
+  });
+}
+
+/** Server worker only: its authenticated SDK stream must already exclude outbound and group messages. */
+async function receiveLegacyLandlordMessage(ownerId: string, caseId: string | undefined, incoming: IncomingLandlordMessage) {
+  const config = getPhotonConfig();
+  if (!config || ownerId !== config.tenantId) {
+    throw new ApiError(403, "The incoming message is not bound to the configured tenant and case.", false, "MESSAGE_BINDING_REJECTED");
+  }
+  const body = validateIncomingParticipantMessage(incoming);
   return mutateSession(ownerId, async (document) => {
     const sender = normalizeMessagingContact(incoming.sender);
     if (!sender || sender !== config.allowedRecipient) {
@@ -977,7 +1501,7 @@ export async function receiveLandlordMessage(ownerId: string, caseId: string | u
     // Plain replies must match one case; a provider reply target can disambiguate a shared DM.
     const targetCaseId = caseId ?? matches[0]?.record.id;
     if (!targetCaseId || !matches.length || matches.some(({ record }) => record.id !== targetCaseId || record.ownerId !== ownerId)
-      || (config.sendingLine && incoming.sendingLine !== config.sendingLine)) {
+      || !matchesSpectrumSendingLine(incoming.sendingLine, config.sendingLine)) {
       throw new ApiError(403, "No unambiguous approved conversation matches this reply.", false, "MESSAGE_BINDING_REJECTED");
     }
     const caseRecord = findCase(document, targetCaseId);
@@ -1010,14 +1534,23 @@ export async function receiveLandlordMessage(ownerId: string, caseId: string | u
   });
 }
 
+/** Compatibility wrapper for the original one-way landlord listener and fixtures. */
+export async function receiveLandlordMessage(ownerId: string, caseId: string | undefined, incoming: IncomingLandlordMessage) {
+  const document = await readSession(ownerId);
+  if (document?.cases.some((record) => record.messagingBinding)) return receiveParticipantMessage(ownerId, incoming);
+  return receiveLegacyLandlordMessage(ownerId, caseId, incoming);
+}
+
 export async function performCaseAction(ownerId: string, caseId: string, action: CaseAction, messaging = defaultMessaging) {
   return mutateSession(ownerId, (document, mutation) => {
     const caseRecord = findCase(document, caseId);
     if (document.tenantUserId && (action.action === "simulate_landlord_reply" || action.action === "record_landlord_reply")) {
       throw new ApiError(403, "Landlord replies and repair reports must come from the assigned property manager.", false, "ROLE_NOT_ALLOWED");
     }
-    const xrplAction = action.action === "enable_xrpl" || action.action === "settle_xrpl"
-      || action.action === "reconcile_xrpl" || action.action === "xrpl_security_demo";
+    const xrplAction = action.action === "enable_xrpl" || action.action === "authorize_xrpl_agent"
+      || action.action === "settle_xrpl" || action.action === "reconcile_xrpl"
+      || action.action === "xrpl_security_demo"
+      || (action.action === "confirm_resolution" && Boolean(caseRecord.xrplSettlement?.agentAuthorizedAt));
     if (xrplAction && document.tenantUserId && document.xrplAuthorized !== true) {
       throw new ApiError(403, "This tenant workspace is not authorized to use the configured XRPL signer.", false,
         "XRPL_ACCOUNT_NOT_AUTHORIZED");

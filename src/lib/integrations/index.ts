@@ -16,14 +16,14 @@ export function getIntegrationStatus(): IntegrationStatus[] {
   const nessie = Boolean(process.env.NESSIE_API_KEY && process.env.NESSIE_TENANT_ID && process.env.NESSIE_CUSTOMER_ID && process.env.NESSIE_ACCOUNT_ID);
   let photon: IntegrationStatus = { id: "photon", name: "Photon iMessage", status: "demo", detail: "Messages remain in the demo. No external delivery." };
   try {
-    if (getPhotonConfig()) photon = { ...photon, status: "configured", detail: "Spectrum credentials and a fixed tenant/case/recipient are configured. Only approved sends can reach iMessage; connectivity and delivery are not implied by this status." };
+    if (getPhotonConfig()) photon = { ...photon, status: "configured", detail: "Spectrum credentials are configured. Bound case submission starts repair coordination; agents relay permitted updates between configured participants. Provider acceptance is not delivery proof." };
   } catch { photon = { ...photon, status: "unavailable", detail: "Live messaging is enabled but Spectrum credentials or tenant/case/recipient binding are incomplete. No demo fallback is used." }; }
   const mongoEnabled = process.env.RENTESCROW_STORAGE === "mongodb";
   let xrpl: IntegrationStatus = { id: "xrpl", name: "XRP Ledger", status: "demo", detail: "USD escrow is simulated. Run pnpm xrpl:setup-testnet to enable a separate real Testnet Payment after verified repair." };
   try {
-    if (getXrplConfig()) xrpl = { ...xrpl, status: mongoEnabled ? "unavailable" : "configured", detail: mongoEnabled
-      ? "Testnet payments require local storage on a single host. MongoDB case storage remains available for the simulated workflow."
-      : "Dedicated Testnet wallets configured. Enable settlement per case; validated Test XRP Payments are separate from simulated USD." };
+    if (getXrplConfig()) xrpl = { ...xrpl, status: mongoEnabled && !process.env.MONGODB_URI ? "unavailable" : "configured", detail: mongoEnabled && !process.env.MONGODB_URI
+      ? "MongoDB is selected but its server connection is missing. Configure storage before enabling settlement."
+      : "Dedicated Testnet wallets configured. Enable settlement per case; validated Test XRP Payments are separate from simulated USD. Durable wallet locks and receipts use the configured case storage." };
   } catch { xrpl = { ...xrpl, status: "unavailable", detail: "Testnet configuration is invalid. Check the pinned network, wallet addresses, signing credential, and amount on the server." }; }
   return [
     { id: "gemini", name: "Gemini", status: gemini ? "configured" : "demo", detail: gemini ? "Server credentials present; uploaded evidence uses Gemini. Connectivity has not been verified." : "Sample analysis only. Real uploads remain unverified until Gemini is configured." },

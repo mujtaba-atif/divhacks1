@@ -53,8 +53,9 @@ export function resolveFinancialBinding(record: Pick<CaseRecord, "id" | "ownerId
   if (!id.safeParse(customerId).success || !id.safeParse(accountId).success) {
     fail("NESSIE_INVALID_ID", "The configured Nessie customer or account identifier is invalid.");
   }
-  if (stored?.source === "nessie" && stored.customerId !== customerId) fail("NESSIE_CUSTOMER_MISMATCH", "The configured customer differs from the case's saved financial binding.");
-  if (stored?.source === "nessie" && stored.accountId !== accountId) fail("NESSIE_ACCOUNT_MISMATCH", "The configured account differs from the case's saved financial binding.");
+  // An incomplete failed first attempt stays live-bound but can recover once the operator completes configuration.
+  if (stored?.source === "nessie" && stored.customerId && stored.customerId !== customerId) fail("NESSIE_CUSTOMER_MISMATCH", "The configured customer differs from the case's saved financial binding.");
+  if (stored?.source === "nessie" && stored.accountId && stored.accountId !== accountId) fail("NESSIE_ACCOUNT_MISMATCH", "The configured account differs from the case's saved financial binding.");
   return { tenantId, customerId, accountId, caseId: record.id, source: "nessie" };
 }
 

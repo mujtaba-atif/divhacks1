@@ -75,8 +75,8 @@ test("mobile navigation, dialogs, and new case creation remain usable", async ({
   await dialog.getByLabel("Borough").selectOption("Brooklyn");
   await dialog.getByLabel("Apartment", { exact: true }).fill("5A");
   await dialog.getByLabel("What happened?").fill("The radiator is cold and the apartment has had no heat since Monday.");
-  await expect(dialog.getByLabel("Landlord / property manager")).toHaveValue("Rayyan Khan");
-  await expect(dialog.getByLabel("Landlord contact")).toHaveValue("+19736060558");
+  await expect(dialog.getByLabel("Landlord / property manager")).toHaveValue("Alex Morgan");
+  await expect(dialog.getByLabel("Landlord contact")).toHaveValue("+1 (***) ***-7033");
   await dialog.getByLabel("Monthly rent (USD)").fill("1850");
   await dialog.getByLabel("Disputed amount (USD)").fill("400");
   await dialog.getByRole("button", { name: "Create case", exact: true }).click();
