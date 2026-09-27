@@ -165,7 +165,7 @@ async function mockXrpl(page: Page, initial: "unbound" | "ready" | "pending" | "
 
 test("agent authorization reviews exact permission, then tenant confirmation triggers settlement without a payment request", async ({ page }) => {
   const { actions } = await mockXrpl(page, "ready", { awaitingConfirmation: true });
-  await page.goto("/");
+  await page.goto("/tenant?case=RE-1042");
   await page.getByRole("tab", { name: "Escrow", exact: true }).click();
   await page.getByRole("button", { name: "Review agent authorization", exact: true }).click();
   const review = page.getByRole("dialog", { name: "Authorize XRPL settlement agent" });
@@ -182,7 +182,7 @@ test("agent authorization reviews exact permission, then tenant confirmation tri
 
 test("RLUSD settlement shows trusted identity, blocks definition replacement, and records autonomous delivery", async ({ page }) => {
   const { actions } = await mockXrpl(page, "ready", { awaitingConfirmation: true, asset: "RLUSD" });
-  await page.goto("/");
+  await page.goto("/tenant?case=RE-1042");
   await page.getByRole("tab", { name: "Escrow", exact: true }).click();
 
   await expect(page.getByText("$400", { exact: true }).first()).toBeVisible();
@@ -221,7 +221,7 @@ test("RLUSD settlement shows trusted identity, blocks definition replacement, an
 
 test("signed agreement governs RLUSD settlement without a per-payment approval", async ({ page }) => {
   const { actions } = await mockXrpl(page, "ready", { awaitingConfirmation: true, asset: "RLUSD", contractBound: true });
-  await page.goto("/");
+  await page.goto("/tenant?case=RE-1042");
   await page.getByRole("tab", { name: "Escrow", exact: true }).click();
 
   const authority = page.getByRole("region", { name: "Signed agreement authority" });
@@ -253,7 +253,7 @@ test("signed agreement governs RLUSD settlement without a per-payment approval",
 
 test("case-bound Testnet settlement requires review and exposes the validated receipt", async ({ page }) => {
   await mockXrpl(page, "unbound");
-  await page.goto("/");
+  await page.goto("/tenant?case=RE-1042");
   await page.getByRole("tab", { name: "Escrow", exact: true }).click();
 
   await page.getByRole("button", { name: "Enable Testnet settlement", exact: true }).click();
@@ -280,7 +280,7 @@ test("case-bound Testnet settlement requires review and exposes the validated re
 test("a pending signed payment stays unsettled until reconciliation validates it", async ({ page }) => {
   await mockXrpl(page, "pending");
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await page.goto("/tenant?case=RE-1042");
   await page.getByRole("tab", { name: "Escrow", exact: true }).click();
   await expect(page.getByText("Validation outcome pending", { exact: true })).toBeVisible();
   await expect(page.getByText("Nothing signed. Nothing submitted.", { exact: true })).toHaveCount(0);
@@ -295,7 +295,7 @@ test("a pending signed payment stays unsettled until reconciliation validates it
 test("unavailable settlement exposes the server reason and keeps simulated release available", async ({ page }) => {
   const detail = "MongoDB is selected but its server connection is missing. Configure storage before enabling settlement.";
   const mock = await mockXrpl(page, "unbound", { integration: { id: "xrpl", name: "XRPL Testnet", status: "unavailable", detail } });
-  await page.goto("/");
+  await page.goto("/tenant?case=RE-1042");
   await page.getByRole("tab", { name: "Escrow", exact: true }).click();
   await expect(page.getByText("Testnet settlement is unavailable", { exact: true })).toBeVisible();
   await expect(page.getByText(detail, { exact: true })).toBeVisible();
@@ -307,7 +307,7 @@ test("unavailable settlement exposes the server reason and keeps simulated relea
 
 test("legacy policy checks are explicitly scoped to simulated USD", async ({ page }) => {
   const mock = await mockXrpl(page, "unbound");
-  await page.goto("/");
+  await page.goto("/tenant?case=RE-1042");
   await page.getByRole("tab", { name: "Escrow", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Simulation guardrails", exact: true })).toBeVisible();
   await expect(page.getByText("Simulated USD only. These checks do not authorize an XRPL payment.", { exact: true })).toBeVisible();
@@ -318,7 +318,7 @@ test("legacy policy checks are explicitly scoped to simulated USD", async ({ pag
 
 test("a failed settlement with a recorded hash permits reconciliation but not fresh approval", async ({ page }) => {
   const mock = await mockXrpl(page, "failed");
-  await page.goto("/");
+  await page.goto("/tenant?case=RE-1042");
   await page.getByRole("tab", { name: "Escrow", exact: true }).click();
   await expect(page.getByText("Settlement not completed", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Review Testnet settlement", exact: true })).toBeDisabled();
@@ -329,7 +329,7 @@ test("a failed settlement with a recorded hash permits reconciliation but not fr
 
 test("an uncertain submission disables repeat approval in the open review dialog", async ({ page }) => {
   const mock = await mockXrpl(page, "ready", { submissionFailure: true });
-  await page.goto("/");
+  await page.goto("/tenant?case=RE-1042");
   await page.getByRole("tab", { name: "Escrow", exact: true }).click();
   await page.getByRole("button", { name: "Review 10 Test XRP payment", exact: true }).click();
   const review = page.getByRole("dialog", { name: "Review XRPL Testnet settlement" });

@@ -21,6 +21,7 @@ const INVALID_CREDENTIALS = "Invalid email or password.";
 export const loginSchema = z.object({
   email: z.string().trim().email().max(320).transform((value) => value.toLowerCase()),
   password: z.string().min(1).max(256),
+  expectedRole: z.enum(["tenant", "landlord"]).optional(),
 }).strict();
 
 function sessionTokenHash(token: string): string {
@@ -60,6 +61,17 @@ export async function loginWithPassword(
   const record = await activeStorage.findUserByEmail(input.email.toLowerCase());
   const validPassword = await verifyPassword(input.password, record?.passwordHash);
   if (!record || !validPassword) throw new ApiError(401, INVALID_CREDENTIALS);
+  const user = authUserFromRecord(record);
+  if (input.expectedRole && user.role !== input.expectedRole) {
+    const accountRole = user.role;
+    const accountRoleLabel = accountRole === "tenant" ? "Tenant" : "Landlord";
+    throw new ApiError(
+      403,
+      `This account belongs to a ${accountRole}. Select ${accountRoleLabel} to sign in.`,
+      false,
+      "ROLE_MISMATCH",
+    );
+  }
 
   const token = randomBytes(32).toString("hex");
   const createdAt = new Date();
@@ -70,7 +82,7 @@ export async function loginWithPassword(
     createdAt,
     expiresAt,
   });
-  return { user: authUserFromRecord(record), token, expiresAt };
+  return { user, token, expiresAt };
 }
 
 export async function getCurrentUser(token?: string, storage?: AuthStorage): Promise<AuthUser | null> {

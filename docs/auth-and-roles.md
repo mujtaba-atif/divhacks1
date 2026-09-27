@@ -62,6 +62,13 @@ hash. Login compares the submitted password against the stored hash. Unknown
 emails also run a bcrypt comparison and receive the same generic error as a
 wrong password. API responses never include a password or password hash.
 
+The sign-in role chooser sends an optional `expectedRole` of `tenant` or
+`landlord`. The server verifies the credentials first, then compares that choice
+with the account's stored role before creating a session. A mismatch returns
+`403 ROLE_MISMATCH` with guidance to select the account's actual role. The
+choice never assigns or changes an account role, and clients that omit it keep
+the existing role-agnostic login behavior.
+
 The browser receives only the opaque token in an HttpOnly, SameSite=Strict
 cookie, Secure in production. The server hashes the token, looks up an unexpired
 session, and loads the authoritative user from MongoDB on every request. Logout

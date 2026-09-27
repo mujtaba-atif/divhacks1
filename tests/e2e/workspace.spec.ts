@@ -21,10 +21,14 @@ test("desktop workspace renders assets and completes the tenant repair workflow"
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.setViewportSize({ width: 1440, height: 1050 });
-  await page.goto("/");
+  await page.goto("/tenant?case=RE-1042");
   await expect(page.getByRole("heading", { name: "No heat in apartment", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open evidence image" }).locator("img")).toBeVisible();
   await expect.poll(() => page.locator("img").first().evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
+  await page.getByRole("button", { name: "Open evidence image" }).click();
+  await expect(page.getByRole("button", { name: "Evidence library" })).toBeVisible();
+  await page.getByRole("button", { name: "Evidence library" }).click();
+  await expect(page.getByRole("heading", { name: "Evidence library", exact: true })).toBeVisible();
   await page.screenshot({ path: "test-results/workspace-desktop.png", fullPage: true });
 
   await page.getByRole("tab", { name: "Messages", exact: true }).click();
@@ -61,13 +65,32 @@ test("desktop workspace renders assets and completes the tenant repair workflow"
   expect(pageErrors).toEqual([]);
 });
 
+test("tenant workspace keeps case navigation in the URL and restores browser history", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 900 });
+  await page.goto("/tenant");
+  await expect(page.getByRole("heading", { name: "My cases", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+
+  await page.getByRole("button", { name: "Open No heat in apartment" }).click();
+  await page.getByRole("tab", { name: "Messages", exact: true }).click();
+  await expect(page).toHaveURL(/\/tenant\?case=RE-1042&tab=messages$/);
+  await page.reload();
+  await expect(page.getByRole("tab", { name: "Messages", exact: true })).toHaveAttribute("aria-selected", "true");
+
+  await page.getByRole("button", { name: "My cases", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/tenant$/);
+  await page.goBack();
+  await expect(page.getByRole("tab", { name: "Messages", exact: true })).toHaveAttribute("aria-selected", "true");
+});
+
 test("mobile navigation, dialogs, and new case creation remain usable", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await page.goto("/tenant?case=RE-1042");
   await expect(page.getByRole("heading", { name: "No heat in apartment", exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
   await page.screenshot({ path: "test-results/workspace-mobile.png", fullPage: true });
   await page.getByRole("button", { name: "Open workspace navigation" }).click();
+  await page.getByRole("button", { name: "My cases", exact: true }).click();
   await page.getByRole("button", { name: "New case", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Open a repair case" });
   await expect(dialog).toBeVisible();
