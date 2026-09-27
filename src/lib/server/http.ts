@@ -49,7 +49,11 @@ export function assertSameOrigin(request: NextRequest) {
 }
 
 export function respond(data: unknown, session?: SessionContext, status = 200) {
-  const response = NextResponse.json(data, { status });
+  // Provider routing authority is private even when a response or error includes
+  // the rest of the tenant's case. Apply at serialization so nested case arrays,
+  // action failures, and exported dossiers all use the same boundary.
+  const body = JSON.stringify(data, (key, value: unknown) => key === "messagingBinding" ? undefined : value);
+  const response = new NextResponse(body, { status, headers: { "Content-Type": "application/json" } });
   response.headers.set("Cache-Control", "no-store, private");
   response.headers.set("X-Content-Type-Options", "nosniff");
   return response;

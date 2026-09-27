@@ -131,7 +131,8 @@ account-substitution demonstration is a policy dry run with no settlement.
 
 The app uses the installed `spectrum-ts` SDK and its official
 [direct-message API](https://photon.codes/docs/spectrum-ts/spaces-and-users).
-Only a validated, explicitly approved send action can dispatch. The adapter
+Case submission starts repair coordination for trusted two-sided bindings; manual
+sends require explicit approval. The adapter
 checks the server-owned tenant/case/contact against an operator allowlist,
 appends the case reference, creates the approved DM, and checks the returned
 outbound message ID, text, conversation, sending line, and timestamp. `sent`
@@ -145,18 +146,18 @@ post-send save conflicts, the durable pending record still blocks duplicate
 dispatch until an operator investigates. There is no automatic reconciliation.
 
 `pnpm agent` now starts `scripts/spectrum-replies.ts`, not the legacy echo example.
-The worker accepts only authenticated inbound DM text from the approved contact
+The worker accepts authenticated inbound DM text from either configured participant
 in a recorded outbound conversation, matched by tenant, case, sending line,
 provider ID and time. Threaded replies must reference a matching outbound ID.
-It persists and classifies replies but never auto-replies, changes payment
-destinations, or authorizes financial actions. Browser-entered sample replies
+It persists and classifies replies and sends mediated repair updates through the
+opposite-side agent. It cannot change payment destinations or authorize financial actions. Browser-entered sample replies
 remain explicitly demo data. No public unauthenticated webhook is exposed.
 
 The unwrapped SDK can share a provider contact card before application filtering.
 Our reply provider disables that behavior locally through a tested, version-pinned
 provider configuration wrapper, without changing cloud settings or token renewal.
-SDK telemetry is off. Send-attempt diagnostics include demo participant/contact
-bindings, but never credentials or message bodies; keep server logs private.
+SDK telemetry is off. Send-attempt diagnostics use masked contacts and never include credentials or
+message bodies.
 See [configuration, limitations, and walkthrough](photon-spectrum.md).
 
 ### Dependency setup
@@ -182,6 +183,13 @@ conversion occurs. The server constructs an exact direct
 [Payment](https://xrpl.org/docs/references/protocol/transactions/types/payment),
 rejects partial-payment/extra fields, persists the signed hash before submission,
 and accepts only a matching validated `tesSUCCESS` plus exact delivered amount.
+
+An explicitly authorized settlement agent requests only the case/action after
+repair verification and tenant confirmation. Pinned participant identities,
+wallets, amount, network and transaction type come from trusted server state.
+The final policy and requesting actor are saved in the journal and case audit.
+A new autonomous 10 Test XRP Payment was independently verified in ledger
+21087767; the walkthrough contains its explorer link and repeatable judge steps.
 
 `pnpm xrpl:setup-testnet` uses the existing `xrpl.js`
 [`Client.fundWallet`](https://js.xrpl.org/classes/Client.html#fundWallet) API.

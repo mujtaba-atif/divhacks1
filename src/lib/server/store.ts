@@ -3,7 +3,8 @@ import "server-only";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, open, readFile, readdir, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createDemoCase } from "@/lib/seed";
+import { createDemoCase, DEMO_PARTICIPANTS } from "@/lib/seed";
+import { normalizeMessagingContact } from "@/lib/messaging-contact";
 import type { AuthUser, CaseRecord } from "@/lib/types";
 import type { RegisteredUser } from "./auth";
 import type { DigitalContract } from "./contracts";
@@ -28,10 +29,12 @@ export interface SessionDocument {
   contracts?: DigitalContract[];
   tenantUserId?: string;
   tenantDisplayName?: string;
+  /** Snapshot of operator-configured user contacts; no API can supply these. */
+  messagingContacts?: { tenantPhone?: string; landlordPhone: string };
   demoAccount?: "tenant1" | "tenant2";
   /** Server-seeded signer binding. Browser input can never grant this authority. */
   xrplAuthorized?: true;
-  managedProperty?: { id: string; address: string; borough: string; landlordUserId: string };
+  managedProperty?: { id: string; address: string; borough: string; landlordUserId: string; landlordDisplayName?: string };
 }
 
 const sharedRuntime = globalThis as typeof globalThis & { rentEscrowLocks?: Map<string, Promise<void>> };
@@ -135,32 +138,67 @@ export function assignCaseOwnership(document: SessionDocument, record: CaseRecor
   if (matches) record.landlordUserId = property.landlordUserId;
   else delete record.landlordUserId;
   record.repairs ??= [];
+  if (record.case_type !== undefined) return;
+  record.tenantName = document.tenantDisplayName ?? "Tenant";
+  // Only contacts copied from configured MongoDB users can activate two-sided routing.
+  const tenantPhone = normalizeMessagingContact(document.messagingContacts?.tenantPhone);
+  const landlordPhone = normalizeMessagingContact(document.messagingContacts?.landlordPhone);
+  record.tenantPhone = tenantPhone ?? "";
+  record.tenant = { name: record.tenantName, phone: record.tenantPhone };
+  if (matches && property.landlordDisplayName) record.landlordName = property.landlordDisplayName;
+  if (matches && landlordPhone) record.landlordContact = landlordPhone;
+  if (matches && tenantPhone?.startsWith("+") && landlordPhone?.startsWith("+")
+    && tenantPhone !== landlordPhone) {
+    record.messagingBinding = {
+      ownerId: document.ownerId, caseId: record.id,
+      tenant: { userId: document.tenantUserId, phone: tenantPhone },
+      landlord: { userId: property.landlordUserId, phone: landlordPhone },
+    };
+    record.demoMessagingBinding = { ownerId: document.ownerId, caseId: record.id, recipient: landlordPhone };
+  } else {
+    delete record.messagingBinding;
+  }
 }
 
 /** Idempotent seed: never replace an existing user's case or financial history. */
-export async function initializeUserWorkspace(user: AuthUser, landlordUserId: string): Promise<void> {
+export async function initializeUserWorkspace(
+  user: AuthUser,
+  landlordUserId: string,
+  messagingContacts?: SessionDocument["messagingContacts"],
+): Promise<void> {
   if (user.role !== "tenant") return;
   const existing = await readMongoSession(user.workspaceOwnerId);
   if (existing) {
     if (existing.tenantUserId !== user.id) {
       throw new ApiError(409, "The existing workspace belongs to a different user.", false, "CASE_ACCESS_DENIED");
     }
-    const shouldAuthorizeXrpl = user.email === "tenant1@rentescrow.demo";
-    if (shouldAuthorizeXrpl !== (existing.xrplAuthorized === true)) {
-      const expectedRevision = existing.revision;
-      if (shouldAuthorizeXrpl) existing.xrplAuthorized = true;
-      else delete existing.xrplAuthorized;
-      existing.revision = expectedRevision + 1;
-      await saveMongoSession(existing, expectedRevision);
-    }
+    await mutateSession(user.workspaceOwnerId, (document) => {
+      if (user.email === "tenant1@rentescrow.demo") document.xrplAuthorized = true;
+      else delete document.xrplAuthorized;
+      document.tenantDisplayName = user.displayName;
+      if (document.managedProperty?.landlordUserId === landlordUserId) {
+        document.managedProperty.landlordDisplayName = DEMO_PARTICIPANTS.landlord.name;
+      }
+      if (messagingContacts) document.messagingContacts = messagingContacts;
+      for (const record of document.cases) {
+        // Do not relabel or rebind any existing live conversation or settlement.
+        if (record.case_type !== undefined || record.messagingBinding || record.status === "resolved" || record.escrow.status === "released"
+          || record.xrplSettlement?.status === "pending" || record.xrplSettlement?.status === "validated"
+          || record.messages.some((message) => message.provider !== "demo"
+            && ["sent", "received", "pending", "uncertain"].includes(message.delivery))) continue;
+        assignCaseOwnership(document, record);
+      }
+    });
     return;
   }
   const document = seedSession(user.workspaceOwnerId);
   document.tenantUserId = user.id;
   document.tenantDisplayName = user.displayName;
+  if (messagingContacts) document.messagingContacts = messagingContacts;
   document.demoAccount = user.email === "tenant1@rentescrow.demo" ? "tenant1" : "tenant2";
   if (document.demoAccount === "tenant1") document.xrplAuthorized = true;
-  document.managedProperty = { id: "demo-123-example", address: "123 Example Street", borough: "Brooklyn", landlordUserId };
+  document.managedProperty = { id: "demo-123-example", address: "123 Example Street", borough: "Brooklyn", landlordUserId,
+    landlordDisplayName: DEMO_PARTICIPANTS.landlord.name };
   if (document.demoAccount === "tenant2") document.cases = [];
   for (const record of document.cases) assignCaseOwnership(document, record);
   await saveMongoSession(document);

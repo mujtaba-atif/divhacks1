@@ -1,11 +1,11 @@
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { normalizeMessagingContact } from "../src/lib/messaging-contact";
+import { maskMessagingContact, normalizeMessagingContact } from "../src/lib/messaging-contact";
 import { getPhotonConfig, type PhotonConfig } from "../src/lib/integrations/photon";
-import { withSpectrumTimeout } from "../src/lib/integrations/spectrum";
+import { matchesSpectrumSendingLine, withSpectrumTimeout } from "../src/lib/integrations/spectrum";
 import { withoutIMessageProfileSharing } from "../src/lib/integrations/spectrum-reply-provider";
-import { receiveLandlordMessage, type IncomingLandlordMessage } from "../src/lib/server/cases";
+import { PhotonCaseBindingRejectedError, receiveLandlordMessage, receiveParticipantMessage, type IncomingParticipantMessage, type ParticipantReceiveResult } from "../src/lib/server/cases";
 import { ApiError } from "../src/lib/server/errors";
 
 const spaceSchema = z.object({ id: z.string().min(1), type: z.literal("dm"), phone: z.string().min(1) });
@@ -18,7 +18,7 @@ const messageSchema = z.object({
   content: z.union([textSchema, z.object({ type: z.literal("reply"), content: textSchema, target: z.object({ id: z.string().min(1) }) })]),
 });
 
-export function normalizeSpectrumReply(space: unknown, message: unknown): IncomingLandlordMessage | undefined {
+export function normalizeSpectrumReply(space: unknown, message: unknown): IncomingParticipantMessage | undefined {
   const room = spaceSchema.safeParse(space);
   const parsed = messageSchema.safeParse(message);
   if (!room.success || !parsed.success || room.data.id !== parsed.data.space.id) return undefined;
@@ -32,13 +32,16 @@ export function normalizeSpectrumReply(space: unknown, message: unknown): Incomi
 }
 
 export interface ReplyApp {
-  messages: AsyncIterable<IncomingLandlordMessage | undefined>;
+  messages: AsyncIterable<IncomingParticipantMessage | undefined>;
   stop(): Promise<void>;
 }
 interface ReplyOptions {
   config?: PhotonConfig;
   enabled?: boolean;
   createApp?: (config: PhotonConfig) => Promise<ReplyApp>;
+  /** Preferred two-sided test seam. Production always uses the participant receiver. */
+  receiveParticipant?: typeof receiveParticipantMessage;
+  /** Compatibility test seam for the original one-way listener. */
   receive?: typeof receiveLandlordMessage;
   signal?: AbortSignal;
   logger?: Pick<Console, "log" | "error">;
@@ -70,7 +73,18 @@ async function nextOrAbort<T>(iterator: AsyncIterator<T>, signal?: AbortSignal):
   });
 }
 
-/** Authenticated inbound only. This worker never invokes any send or payment API. */
+export function logPhotonProcessing(processing: ParticipantReceiveResult["processing"], logger: Pick<Console, "log" | "error">): void {
+  const { relay, ...inbound } = processing;
+  logger.log(`INBOUND_PHOTON_MESSAGE ${JSON.stringify(inbound)}`);
+  const failed = ["failed", "uncertain", "pending"].includes(relay.status);
+  const label = `${relay.role.toUpperCase()}_RELAY${failed ? "_FAILED" : ""}`;
+  const details = { caseId: processing.caseId, providerEventId: processing.providerEventId,
+    duplicate: processing.duplicate, ...relay };
+  if (failed) logger.error(`${label} ${JSON.stringify(details)}`);
+  else logger.log(`${label} ${JSON.stringify(details)}`);
+}
+
+/** Authenticated inbound only. Repair relays use trusted bindings; financial actions are unavailable here. */
 export async function runSpectrumReplies(options: ReplyOptions = {}): Promise<number> {
   const logger = options.logger ?? console;
   let app: ReplyApp | undefined;
@@ -85,21 +99,37 @@ export async function runSpectrumReplies(options: ReplyOptions = {}): Promise<nu
     if (options.signal?.aborted) return 0;
     app = await (options.createApp ?? createReplyApp)(config);
     const iterator = app.messages[Symbol.asyncIterator]();
-    logger.log("Spectrum case reply listener started. Application auto-replies are disabled.");
+    logger.log("Spectrum case reply listener started. Mediated repair relays are enabled; financial actions are unavailable.");
     while (!options.signal?.aborted) {
       const result = await nextOrAbort(iterator, options.signal);
       if (!result || result.done) break;
       const incoming = result.value;
-      if (!incoming || normalizeMessagingContact(incoming.sender) !== config.allowedRecipient
-        || (config.sendingLine && incoming.sendingLine !== config.sendingLine)) continue;
+      const sender = incoming && normalizeMessagingContact(incoming.sender);
+      const approvedContacts = new Set([config.allowedRecipient, config.tenantPhone].filter((value): value is string => Boolean(value)));
+      if (!incoming || !sender || !approvedContacts.has(sender)
+        || !matchesSpectrumSendingLine(incoming.sendingLine, config.sendingLine)) continue;
+      logger.log(`PHOTON_EVENT_RECEIVED ${JSON.stringify({ providerEventId: incoming.id, senderMasked: maskMessagingContact(sender) })}`);
       try {
-        await (options.receive ?? receiveLandlordMessage)(config.tenantId, undefined, incoming);
-        logger.log("Case reply persisted or already recorded.");
+        // Live events always take the two-sided path. The one-way callback is
+        // retained only as an explicit compatibility seam for old fixtures.
+        const result: { case: ParticipantReceiveResult["case"]; processing?: ParticipantReceiveResult["processing"] }
+          = options.receiveParticipant ? await options.receiveParticipant(config.tenantId, incoming)
+          : options.receive ? await options.receive(config.tenantId, undefined, incoming)
+            : await receiveParticipantMessage(config.tenantId, incoming);
+        if (result.processing) logPhotonProcessing(result.processing, logger);
+        else logger.log("INBOUND_PHOTON_MESSAGE status=recorded processing=unavailable");
       } catch (error) {
         if (error instanceof ApiError && error.code === "MESSAGE_BINDING_REJECTED") {
-          logger.log("Ignored a reply outside the approved case conversation.");
+          if (error instanceof PhotonCaseBindingRejectedError) {
+            for (const diagnostic of error.diagnostics) {
+              logger.log(`CASE_BINDING_REJECTED ${JSON.stringify({ providerEventId: incoming.id, ...diagnostic })}`);
+            }
+          }
+          logger.log(`INBOUND_PHOTON_REJECTED ${JSON.stringify({ providerEventId: incoming.id,
+            reason: "case_binding_rejected", failedCheck: error instanceof PhotonCaseBindingRejectedError ? error.reason : "unspecified" })}`);
           continue;
         }
+        logger.error(`INBOUND_PHOTON_FAILED ${JSON.stringify({ providerEventId: incoming.id, reason: "processing_or_persistence_failed" })}`);
         // Stop on a persistence/classification failure rather than silently consuming further messages.
         throw error;
       }

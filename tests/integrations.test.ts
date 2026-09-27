@@ -143,7 +143,7 @@ test("Photon reports uncertain delivery when a dispatched request loses its rece
   let sends = 0;
   const conversationId = `any;-;${record.landlordContact}`;
   const dependencies = { createApp: async () => ({
-    createDirectMessage: async () => ({
+    openDirectMessage: async () => ({
       id: conversationId, type: "dm", phone: "shared",
       send: async (body: string) => {
         sends++;

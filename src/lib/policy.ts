@@ -107,6 +107,9 @@ export function makeXrplIntent(record: CaseRecord): XrplSettlementIntent {
     transactionType: "Payment", network: settlement?.network ?? "testnet",
     source: settlement?.source ?? "", destination: settlement?.destination ?? "",
     amountDrops: settlement?.amountDrops ?? "0", amountUsdCents: record.disputedAmountCents,
+    ...(settlement?.tenantUserId ? { tenantUserId: settlement.tenantUserId } : {}),
+    ...(settlement?.landlordUserId ? { landlordUserId: settlement.landlordUserId } : {}),
+    ...(settlement?.landlordWallet ? { landlordWallet: settlement.landlordWallet } : {}),
   };
 }
 
@@ -129,6 +132,17 @@ export function evaluateXrplPolicy(record: CaseRecord, intent: XrplSettlementInt
   `This permission applies only to case ${record.id} and its bound settlement.`);
   check("TENANT_MISMATCH", "Authorized tenant", !!ownerId && ownerId === record.ownerId
     && intent.ownerId === ownerId && settlement?.ownerId === ownerId, "The session must own this case and settlement.");
+  check("TENANT_MISMATCH", "Pinned tenant identity", !!settlement?.tenantUserId
+    && settlement.tenantUserId === (record.tenantUserId ?? record.ownerId)
+    && intent.tenantUserId === settlement.tenantUserId,
+  "The authorized tenant identity cannot change after the payment is enabled.");
+  check("LANDLORD_MISMATCH", "Pinned landlord identity", !!settlement?.landlordUserId
+    && (!record.tenantUserId || !!record.landlordUserId)
+    && settlement.landlordUserId === (record.landlordUserId ?? record.escrow.destination)
+    && intent.landlordUserId === settlement.landlordUserId
+    && !!settlement.landlordWallet && settlement.landlordWallet === record.escrow.destination
+    && intent.landlordWallet === settlement.landlordWallet,
+  "The assigned landlord and approved case beneficiary must match the pinned Testnet recipient authorization.");
   check("ACTION_OUTSIDE_PERMISSION_SCOPE", "Settlement review only", intent.requestedAction === "REQUEST_SETTLEMENT_REVIEW"
     && intent.transactionType === "Payment" && settlement?.transactionType === "Payment",
   "Only the bound RentEscrow Testnet settlement Payment is permitted.");

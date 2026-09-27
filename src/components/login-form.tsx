@@ -13,9 +13,9 @@ type DemoAccount = {
 };
 
 const demoAccounts: DemoAccount[] = [
-  { label: "Tenant 1", description: "Taylor Reed · RE-1042", email: "tenant1@rentescrow.demo", password: "TenantDemo123!", initials: "TR" },
+  { label: "Tenant 1", description: "Rayaan · +1 (***) ***-0558", email: "tenant1@rentescrow.demo", password: "TenantDemo123!", initials: "RA" },
   { label: "Tenant 2", description: "Jordan Lee · Separate workspace", email: "tenant2@rentescrow.demo", password: "TenantDemo123!", initials: "JL" },
-  { label: "Property manager", description: "Alex Morgan · 123 Example Street", email: "landlord@rentescrow.demo", password: "LandlordDemo123!", initials: "AM" },
+  { label: "Property manager", description: "Alex Morgan · +1 (***) ***-7033", email: "landlord@rentescrow.demo", password: "LandlordDemo123!", initials: "AM" },
 ];
 
 export default function LoginForm() {

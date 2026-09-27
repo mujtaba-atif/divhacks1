@@ -14,6 +14,7 @@ export class XrplError extends IntegrationError {
     public readonly policy?: PolicyResult,
     public readonly submittedHash?: string,
     public readonly ledgerResult?: string,
+    public readonly signed = false,
   ) {
     super(message, "XRPL Testnet", "rejected");
     this.name = "XrplError";
@@ -58,8 +59,14 @@ export function getXrplConfig(): XrplConfig | null {
 export function createXrplSettlement(record: CaseRecord): XrplSettlement {
   const config = getXrplConfig();
   if (!config) throw new XrplError("XRPL_DISABLED", "Testnet settlement is disabled. Run the one-time wallet setup and restart the server.");
+  if (!record.ownerId || !record.escrow.destination || (record.tenantUserId && !record.landlordUserId)) {
+    throw new XrplError("LANDLORD_MISMATCH", "A trusted tenant and assigned landlord are required before enabling settlement.");
+  }
   return {
     ...config, id: randomUUID(), caseId: record.id, ownerId: record.ownerId,
+    tenantUserId: record.tenantUserId ?? record.ownerId,
+    landlordUserId: record.landlordUserId ?? record.escrow.destination,
+    landlordWallet: record.escrow.destination,
     escrowId: record.escrow.id, transactionType: "Payment", amountUsdCents: record.disputedAmountCents,
     status: "ready", createdAt: new Date().toISOString(),
   };
@@ -71,6 +78,10 @@ export interface XrplPending {
   lastLedgerSequence: number;
   preparedLedgerIndex: number;
   intent: XrplSettlementIntent;
+  /** Final deterministic policy, including live reserve/fee checks, saved before dispatch. */
+  policyDecision?: PolicyResult;
+  policyCheckedAt?: string;
+  actor?: "tenant" | "settlement_agent";
 }
 
 export interface XrplReceipt {
@@ -88,6 +99,7 @@ export interface XrplReceipt {
 
 export interface XrplExecutionContext {
   ownerId: string;
+  actor?: "tenant" | "settlement_agent";
   /** The caller holds a session write lock and shared-wallet lock throughout. */
   loadCase: () => Promise<CaseRecord>;
   /** Durably save before network dispatch. A failure here must prevent submission. */
@@ -100,6 +112,7 @@ function assertPolicy(record: CaseRecord, intent: XrplSettlementIntent, ownerId:
     const failures = policy.checks.filter((item) => !item.passed);
     throw new XrplError(failures[0].key, failures.map((item) => item.detail).join(" "), policy);
   }
+  return policy;
 }
 
 function assertConfigBinding(record: CaseRecord) {
@@ -121,10 +134,15 @@ export function buildXrplPayment(intent: XrplSettlementIntent): Payment {
     || !Number.isSafeInteger(intent.amountUsdCents) || intent.amountUsdCents <= 0) {
     throw new XrplError("ACTION_OUTSIDE_PERMISSION_SCOPE", "Invalid case-bound Testnet settlement intent.");
   }
-  const binding = createHash("sha256").update(JSON.stringify([
+  const permission = [
     intent.ownerId, intent.caseId, intent.escrowId, intent.settlementId, intent.requestedAction,
     intent.transactionType, intent.network, intent.source, intent.destination, intent.amountDrops, intent.amountUsdCents,
-  ])).digest("hex").toUpperCase();
+  ];
+  // Historical receipts retain their original memo; all new permissions include participants.
+  if (intent.tenantUserId || intent.landlordUserId || intent.landlordWallet) {
+    permission.push(intent.tenantUserId ?? "", intent.landlordUserId ?? "", intent.landlordWallet ?? "");
+  }
+  const binding = createHash("sha256").update(JSON.stringify(permission)).digest("hex").toUpperCase();
   const transaction: Payment = {
     TransactionType: "Payment", Account: intent.source, Destination: intent.destination,
     Amount: intent.amountDrops, Flags: 0, InvoiceID: binding,
@@ -190,6 +208,7 @@ export function validatedXrplReceipt(response: TxResponse<Payment>["result"], pe
 export async function executeXrplSettlement(context: XrplExecutionContext): Promise<XrplReceipt> {
   let client: Client | undefined;
   let submittedHash: string | undefined;
+  let didSign = false;
   try {
     const record = structuredClone(await context.loadCase());
     const intent = Object.freeze(makeXrplIntent(record));
@@ -218,28 +237,40 @@ export async function executeXrplSettlement(context: XrplExecutionContext): Prom
       ownerCount: account.result.account_data.OwnerCount, reserveBaseXrp: reserves.reserve_base_xrp,
       reserveIncrementXrp: reserves.reserve_inc_xrp, feeDrops: prepared.Fee!, amountDrops: intent.amountDrops });
     const fresh = await context.loadCase();
-    assertPolicy(fresh, intent, context.ownerId);
+    const finalPolicy = assertPolicy(fresh, intent, context.ownerId);
     assertConfigBinding(fresh);
     if (JSON.stringify(fresh) !== JSON.stringify(record)) throw new XrplError("CASE_CHANGED", "The case changed during preparation. Review it again before signing.");
     assertXrplTestnetEnvironment();
     // The exact transaction and policy are checked immediately before signing, with no intervening IO.
     finalCheck(prepared, expected, ledgerIndex);
+    const policyCheckedAt = new Date().toISOString();
     const signed = wallet.sign(prepared);
+    didSign = true;
     const decoded = decode(signed.tx_blob) as unknown as Payment;
     finalCheck(decoded, expected, ledgerIndex);
     if (decoded.SigningPubKey !== wallet.publicKey) throw new XrplError("TRANSACTION_TAMPERED", "Unexpected signing key.");
-    const pending: XrplPending = { hash: signed.hash, sequence: prepared.Sequence!, lastLedgerSequence: prepared.LastLedgerSequence!, preparedLedgerIndex: ledgerIndex, intent };
+    const pending: XrplPending = {
+      hash: signed.hash, sequence: prepared.Sequence!, lastLedgerSequence: prepared.LastLedgerSequence!, preparedLedgerIndex: ledgerIndex, intent,
+      policyCheckedAt, actor: context.actor ?? "tenant",
+      policyDecision: { ...finalPolicy, checks: [...finalPolicy.checks,
+        { key: "XRPL_SPENDABLE_BALANCE", label: "Spendable Test XRP", passed: true, detail: "Validated balance covers the approved XRP payment, owner reserves, and final fee." },
+        { key: "XRPL_FINAL_TRANSACTION", label: "Final transaction verified", passed: true, detail: "Exact approved Payment, Testnet network ID 1, signing source, sequence, fee and ledger expiry revalidated before signing." },
+      ] },
+    };
     await context.beforeSubmit(pending);
     submittedHash = signed.hash;
     const response = await client.submitAndWait(signed.tx_blob);
     return validatedXrplReceipt(response.result as TxResponse<Payment>["result"], pending);
   } catch (error) {
     if (error instanceof XrplError) {
-      if (submittedHash && !error.submittedHash) throw new XrplError(error.reason, error.message, error.policy, submittedHash, error.ledgerResult);
+      if (didSign || submittedHash) throw new XrplError(error.reason, error.message, error.policy,
+        error.submittedHash ?? submittedHash, error.ledgerResult, didSign || error.signed);
       throw error;
     }
     throw new XrplError(submittedHash ? "XRPL_SUBMISSION_UNCERTAIN" : "XRPL_UNAVAILABLE",
-      submittedHash ? "Submission may have reached Testnet. Reconcile the recorded hash before retrying." : "The Testnet payment could not be prepared. Nothing was submitted.", undefined, submittedHash);
+      submittedHash ? "Submission may have reached Testnet. Reconcile the recorded hash before retrying."
+        : didSign ? "The transaction was signed but preparation could not be persisted. Nothing was submitted."
+        : "The Testnet payment could not be prepared. Nothing signed. Nothing submitted.", undefined, submittedHash, undefined, didSign);
   } finally {
     if (client?.isConnected()) await client.disconnect().catch(() => undefined);
   }

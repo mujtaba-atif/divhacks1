@@ -16,7 +16,7 @@ test("email/password sessions are server-authorized and logout revokes the sessi
     const login = await signIn(request, "tenant1");
     const body = await login.json();
     expect(body).toMatchObject({
-      user: { email: demoUsers.tenant1.email, role: "tenant", displayName: "Taylor Reed" },
+      user: { email: demoUsers.tenant1.email, role: "tenant", displayName: "Rayaan" },
       redirectTo: "/tenant",
     });
     expect(body.user.id).toMatch(/^[a-f0-9]{24}$/);

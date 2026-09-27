@@ -36,11 +36,19 @@ const intentSchema = z.object({
   requestedAction: z.literal("REQUEST_SETTLEMENT_REVIEW"), transactionType: z.literal("Payment"),
   network: z.literal("testnet"), source: journalWallet, destination: journalWallet,
   amountDrops: z.string().regex(/^[1-9]\d*$/), amountUsdCents: z.number().int().positive().safe(),
+  tenantUserId: journalIdentity.optional(), landlordUserId: journalIdentity.optional(), landlordWallet: journalIdentity.optional(),
+}).strict();
+const policySchema = z.object({
+  approved: z.literal(true),
+  checks: z.array(z.object({ key: z.string(), label: z.string(), passed: z.literal(true), detail: z.string() }).strict()).min(1),
+  reasonCodes: z.array(z.string()).optional(),
 }).strict();
 const pendingSchema = z.object({
   hash: journalHash, sequence: z.number().int().positive().safe(),
   lastLedgerSequence: z.number().int().positive().safe(), preparedLedgerIndex: z.number().int().positive().safe(),
   intent: intentSchema,
+  policyDecision: policySchema.optional(), policyCheckedAt: journalDate.optional(),
+  actor: z.enum(["tenant", "settlement_agent"]).optional(),
 }).strict().superRefine((pending, context) => {
   if (pending.lastLedgerSequence <= pending.preparedLedgerIndex) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "Invalid ledger range" });
@@ -98,6 +106,9 @@ function assertJournalIdentity(record: XrplJournalRecord, settlement: XrplSettle
     || record.pending.intent.ownerId !== settlement.ownerId || record.pending.intent.escrowId !== settlement.escrowId
     || record.pending.intent.source !== settlement.source || record.pending.intent.destination !== settlement.destination
     || record.pending.intent.amountDrops !== settlement.amountDrops
+    || record.pending.intent.tenantUserId !== settlement.tenantUserId
+    || record.pending.intent.landlordUserId !== settlement.landlordUserId
+    || record.pending.intent.landlordWallet !== settlement.landlordWallet
     || record.pending.intent.amountUsdCents !== settlement.amountUsdCents) {
     throw new ApiError(500, "The durable XRPL journal does not match this case authorization.", false,
       "XRPL_JOURNAL_MISMATCH");

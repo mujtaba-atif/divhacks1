@@ -16,8 +16,8 @@ pnpm seed:users
 pnpm dev
 ```
 
-Open <http://127.0.0.1:3000>. Sign in as Taylor Reed, Jordan Lee, or Alex Morgan
-using the demo shortcuts. Taylor owns `RE-1042`; Jordan starts with an empty,
+Open <http://127.0.0.1:3000>. Sign in as Rayaan, Jordan Lee, or Alex Morgan
+using the demo shortcuts. Rayaan owns `RE-1042`; Jordan starts with an empty,
 separate workspace; Alex sees assigned repair cases with private banking data
 excluded. Login and case history persist across browser sessions. Demo messages
 remain in the application; simulated USD is not a bank or XRP balance.
@@ -33,7 +33,7 @@ Tenant → Landlord → Tenant walkthrough](docs/auth-and-roles.md).
 2. Review the repair request in Messages and approve sending the demo message.
 3. Set aside $400 of simulated funds in Escrow.
 4. Sign out, sign in as the property manager, and schedule/report the repair.
-   Sign back in as Taylor to continue. Tenant accounts cannot submit landlord reports.
+   Sign back in as Rayaan to continue. Tenant accounts cannot submit landlord reports.
 5. Add the 72 F after-repair sample in Evidence and analyze it.
 6. Verify the before/after evidence, then confirm the repair is complete.
 7. Run the wallet-mismatch check to demonstrate a blocked transaction.
@@ -63,26 +63,29 @@ limitations.
 | NYC Open Data | Case-linked public building history, issue matching, source/freshness labels, and cached HPD complaints/violations |
 | Gemini | Real server-side upload analysis when configured; application rules compare before/after readings |
 | Nessie | Verified sandbox customer/account binding, rent history, tenant-reviewed costs, and account-substitution guardrail |
-| Photon Spectrum | Tenant-approved iMessage, durable send receipts, and an authenticated case reply listener |
+| Photon Spectrum | Two-sided iMessage agents, durable send receipts, and authenticated case replies |
 | MongoDB Atlas | Users, hashed login sessions, tenant workspaces, assignments, repair actions, GridFS uploads, and settlement coordination |
 | XRPL | Guarded real Testnet Payment settlement; application escrow remains simulated USD |
 
 ## Photon Spectrum
 
-The existing Messages tab now uses Spectrum project credentials for live sends.
-Each send requires tenant approval and a server-bound tenant, case, and test
-recipient. Credentials stay in ignored `.env.local`; no HTTP proxy token is used.
-Run `pnpm photon:check` for a read-only authentication check. The separate
-`pnpm agent` command receives authenticated case replies and never auto-replies.
+The existing Messages workflow connects Tenant and Landlord agents through the
+Spectrum cloud listener. New cases with trusted participant bindings send a repair
+notice; replies from either phone produce safe repair events and mediated updates.
+Wallets, amounts, banking identity, and payment approval remain outside messaging.
 
-See [setup, live test, and judge walkthrough](docs/photon-spectrum.md). Demo mode
-remains available with `PHOTON_LIVE_SEND=false`. Provider acceptance is not a
-delivery/read receipt; uncertain sends are retained and cannot be blindly retried.
+Run `pnpm seed:users` to configure Rayaan and Alex's demo contacts. Configure both
+phone destinations and the Spectrum project in ignored `.env.local`, then run
+`pnpm photon:check`, `pnpm dev`, and `pnpm agent` in a separate terminal.
+See [configuration, phone demo, routing, and limits](docs/photon-spectrum.md).
+`PHOTON_LIVE_SEND=false` retains clearly labeled demo sends. Provider acceptance
+is not a delivery/read receipt; uncertain sends are never blindly retried.
 
 ## XRP Testnet demo
 
 ```sh
 pnpm xrpl:setup-testnet
+pnpm xrpl:prepare-demo --reported
 pnpm dev
 ```
 
@@ -91,9 +94,12 @@ Testnet wallets, saves only the tenant signing seed to ignored `.env.local`,
 and preserves existing wallets when rerun. Use `npm run xrpl:setup-testnet` if
 pnpm is unavailable and dependencies are already installed.
 
-In Escrow, set aside the simulated $400 and select **Enable Testnet settlement**.
-Complete the repair verification and tenant confirmation, then review and approve
-the separate **10 Test XRP** payment. This amount is configurable and has no USD
+In Escrow, set aside the simulated $400 and select **Enable Testnet settlement**,
+then **Review agent authorization → Authorize agent settlement**. After repair
+verification and tenant confirmation, the agent requests the separate **10 Test XRP**
+payment through the existing server policy and signer. Manual review remains available.
+The preparation command creates a labeled sample with a sample landlord report;
+tenant evidence verification and confirmation are still required. This amount is configurable and has no USD
 exchange-rate relationship. Only a validated `tesSUCCESS` receipt closes the case.
 The compromised-agent controls demonstrate wallet switching, amount tampering,
 prompt injection, insufficient funds, replay, wrong network/case, and unsupported
@@ -161,7 +167,8 @@ needs credential provisioning, retention/backups, and operational recovery.
 
 Implemented from the original 16-page planning PDF, the eight-page Nessie
 integration addendum, and the 27-page XRP follow-up supplied on September 26,
-2026. The XRP flow uses its permitted Payment fallback.
+2026, and the 15-page two-sided Photon messaging brief supplied September 27.
+The XRP flow uses its permitted Payment fallback.
 [Implementation contract](docs/implementation-contract.md) records the shared
 API and state invariants. [Asset provenance](docs/asset-provenance.md) records the
 generated demonstration images. This prototype organizes evidence and demonstrates

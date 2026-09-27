@@ -1,0 +1,38 @@
+import "server-only";
+
+import type { CaseRecord } from "@/lib/types";
+
+/**
+ * The settlement agent can request one already-authorized case action. Payment
+ * details are deliberately absent: the settlement boundary rebuilds them from
+ * trusted case state and performs the authoritative policy checks.
+ */
+export interface XrplAgentSettlementRequest {
+  readonly caseId: string;
+  readonly action: "settle_xrpl";
+}
+
+export function proposeXrplAgentSettlement(
+  record: Readonly<CaseRecord>,
+): XrplAgentSettlementRequest | null {
+  const settlement = record.xrplSettlement;
+  const authorizedAt = settlement?.agentAuthorizedAt;
+  const tenantEvidenceReady = record.evidence.some((evidence) =>
+    evidence.stage === "after" && evidence.uploadedByRole !== "landlord" && evidence.analysis?.verified === true);
+
+  if (!settlement
+    || settlement.status !== "ready"
+    || settlement.hash
+    || settlement.agentRequestedAt
+    || !authorizedAt
+    || !Number.isFinite(Date.parse(authorizedAt))
+    || record.escrow.status !== "locked"
+    || !record.repairReported
+    || !record.verification?.verified
+    || !record.tenantConfirmed
+    || !tenantEvidenceReady) {
+    return null;
+  }
+
+  return Object.freeze({ caseId: record.id, action: "settle_xrpl" });
+}

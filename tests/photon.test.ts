@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { createDemoCase } from "../src/lib/seed";
-import { getPhotonConfig, prepareLandlordMessage, sendLandlordMessage, type PhotonDependencies } from "../src/lib/integrations/photon";
+import { getPhotonConfig, prepareLandlordMessage, sendLandlordMessage, sendParticipantMessage, type PhotonDependencies } from "../src/lib/integrations/photon";
 import { DeliveryUncertainError, IntegrationError } from "../src/lib/integrations/shared";
 import type { SpectrumClient, SpectrumDirectMessage } from "../src/lib/integrations/spectrum";
 
@@ -51,7 +51,7 @@ function fakeClient(recipient = syntheticEnvironment.PHOTON_ALLOWED_RECIPIENT) {
     },
   };
   const app: SpectrumClient = {
-    createDirectMessage: async (recipient, line) => { conversations.push({ recipient, line }); return dm; },
+    openDirectMessage: async (recipient, line) => { conversations.push({ recipient, line }); return dm; },
     stop: async () => { stops++; },
   };
   const dependencies: PhotonDependencies = {
@@ -63,7 +63,7 @@ function fakeClient(recipient = syntheticEnvironment.PHOTON_ALLOWED_RECIPIENT) {
 const uncertain = (error: unknown) => error instanceof DeliveryUncertainError && error.code === "uncertain_delivery";
 const knownFailure = (error: unknown) => error instanceof IntegrationError && !(error instanceof DeliveryUncertainError);
 
-test("the demo sends to Rayyan's normalized number, never the tenant or a provider line", async (t) => {
+test("the legacy adapter sends only to the normalized configured destination", async (t) => {
   environment(t, { PHOTON_ALLOWED_RECIPIENT: "+1 (973) 606-0558" });
   const record = createDemoCase(syntheticEnvironment.PHOTON_TENANT_ID);
   const fake = fakeClient("+19736060558");
@@ -80,6 +80,33 @@ test("the demo sends to Rayyan's normalized number, never the tenant or a provid
   }
   assert.equal(fake.conversations.length, 3);
   assert.equal(fake.sent.length, 3);
+});
+
+test("both participant adapters dispatch only to their own bound user and phone", async (t) => {
+  const tenantPhone = "+12125550101";
+  const record = environment(t, { PHOTON_TENANT_PHONE: tenantPhone });
+  record.tenantUserId = "tenant-user";
+  record.landlordUserId = "landlord-user";
+  record.messagingBinding = { ownerId: record.ownerId, caseId: record.id,
+    tenant: { userId: record.tenantUserId, phone: tenantPhone },
+    landlord: { userId: record.landlordUserId, phone: record.landlordContact } };
+  for (const role of ["tenant", "landlord"] as const) {
+    const participant: { userId: string; phone: string } = record.messagingBinding[role];
+    const fake = fakeClient(participant.phone);
+    const receipt = await sendParticipantMessage(record, role, "The repair appointment is recorded.", fake.dependencies);
+    assert.equal(receipt.recipient, participant.phone);
+    assert.equal(receipt.recipientUserId, participant.userId);
+    assert.equal(receipt.role, role);
+    assert.equal(receipt.delivery, "sent");
+    assert.deepEqual(fake.conversations, [{ recipient: participant.phone, line: syntheticEnvironment.SPECTRUM_SENDING_LINE }]);
+    assert.equal(fake.sent.length, 1);
+    for (const altered of [{ userId: "another-user" }, { phone: "+12125550999" }]) {
+      const changed = structuredClone(record);
+      Object.assign(changed.messagingBinding![role], altered);
+      await assert.rejects(sendParticipantMessage(changed, role, "Repair update", fake.dependencies), knownFailure);
+    }
+    assert.equal(fake.starts(), 1, "a changed binding must fail before provider initialization");
+  }
 });
 
 test("demo mode never constructs an SDK client and includes the case reference", async (t) => {
@@ -143,13 +170,54 @@ test("Spectrum receives the server-approved recipient and exact prepared body wi
   assert.equal(JSON.stringify(result).includes(syntheticEnvironment.SPECTRUM_PROJECT_SECRET), false);
 });
 
+test("managed shared-line cold starts accept the SDK route and reuse the saved conversation", async (t) => {
+  const record = environment(t, { PHOTON_TENANT_PHONE: "+12125550101" });
+  record.tenantUserId = "tenant-user";
+  record.landlordUserId = "landlord-user";
+  record.messagingBinding = { ownerId: record.ownerId, caseId: record.id,
+    tenant: { userId: record.tenantUserId, phone: "+12125550101" },
+    landlord: { userId: record.landlordUserId, phone: record.landlordContact } };
+  const fake = fakeClient();
+  fake.dm.phone = "shared";
+  const calls: unknown[] = [];
+  fake.app.openDirectMessage = async (...args) => { calls.push(args); return fake.dm; };
+  const first = await sendLandlordMessage(record, "Approved notice", fake.dependencies);
+  assert.equal(first.delivery, "sent");
+  assert.equal(first.sendingLine, "shared");
+  assert.equal(first.providerConversationId, fake.dm.id);
+  Object.assign(record.messagingBinding.landlord, { conversationId: first.providerConversationId, sendingLine: first.sendingLine });
+  await sendLandlordMessage(record, "Approved follow-up", fake.dependencies);
+  assert.deepEqual(calls, [
+    [record.landlordContact, syntheticEnvironment.SPECTRUM_SENDING_LINE, undefined],
+    [record.landlordContact, "shared", fake.dm.id],
+  ]);
+  const changed = structuredClone(record);
+  changed.messagingBinding!.landlord.conversationId = "any;-;+12125550999";
+  await assert.rejects(sendLandlordMessage(changed, "Another update", fake.dependencies), knownFailure);
+  assert.equal(fake.sent.length, 2);
+});
+
+test("invalid configured or conflicting persisted sending lines fail before initialization", async (t) => {
+  const record = environment(t, { SPECTRUM_SENDING_LINE: "not-a-phone" });
+  const fake = fakeClient();
+  await assert.rejects(sendLandlordMessage(record, "Repair request", fake.dependencies), /sending line must be/);
+  process.env.SPECTRUM_SENDING_LINE = syntheticEnvironment.SPECTRUM_SENDING_LINE;
+  record.tenantUserId = "tenant-user";
+  record.landlordUserId = "landlord-user";
+  record.messagingBinding = { ownerId: record.ownerId, caseId: record.id,
+    tenant: { userId: record.tenantUserId, phone: "+12125550101" },
+    landlord: { userId: record.landlordUserId, phone: record.landlordContact, sendingLine: "+12125550999" } };
+  await assert.rejects(sendLandlordMessage(record, "Repair request", fake.dependencies), /sending line does not match/);
+  assert.equal(fake.starts(), 0);
+});
+
 test("startup and conversation failures are sanitized known failures with no dispatch", async (t) => {
   const record = environment(t);
   const fake = fakeClient();
   await assert.rejects(sendLandlordMessage(record, "Repair request", {
     ...fake.dependencies, createApp: async () => { throw new Error("offline-secret-never-log private body"); },
   }), (error: unknown) => knownFailure(error) && !String(error).includes("offline-secret-never-log"));
-  fake.app.createDirectMessage = async () => { throw new Error("offline-secret-never-log private body"); };
+  fake.app.openDirectMessage = async () => { throw new Error("offline-secret-never-log private body"); };
   await assert.rejects(sendLandlordMessage(record, "Repair request", fake.dependencies),
     (error: unknown) => knownFailure(error) && !String(error).includes("offline-secret-never-log"));
   assert.equal(fake.sent.length, 0);
@@ -206,6 +274,32 @@ test("provider send errors and timeouts stay uncertain without retry or private 
     assert.equal(calls, 1);
     assert.equal(fake.stops(), 1);
   }
+});
+
+test("a deprovisioned saved line reports the line problem while retaining uncertain delivery", async (t) => {
+  const record = environment(t);
+  const fake = fakeClient();
+  let sends = 0;
+  fake.dm.send = async () => {
+    sends++;
+    throw new Error("No iMessage client serves phone private-provider-data. Available: private-lines");
+  };
+  await assert.rejects(sendLandlordMessage(record, "Repair request", fake.dependencies), (error: unknown) =>
+    uncertain(error) && /sending line is unavailable/.test(String(error)) && !String(error).includes("private-"));
+  assert.equal(sends, 1);
+});
+
+test("shared routing retains the provider's project-user rejection and never reports a successful receipt", async (t) => {
+  const record = environment(t);
+  const fake = fakeClient();
+  fake.dm.phone = "shared";
+  let sends = 0;
+  fake.dm.send = async () => {
+    sends++;
+    throw Object.assign(new Error("Target not allowed for this project"), { code: "unauthorized", grpcCode: 7 });
+  };
+  await assert.rejects(sendLandlordMessage(record, "Repair request", fake.dependencies), uncertain);
+  assert.equal(sends, 1, "provider rejection must never retry with another recipient or route");
 });
 
 test("cleanup failures do not replace a confirmed send receipt", async (t) => {

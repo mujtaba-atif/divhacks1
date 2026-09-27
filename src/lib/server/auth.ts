@@ -5,6 +5,7 @@ import { cookies } from "next/headers";
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import type { AuthUser } from "@/lib/types";
+import { maskMessagingContact, normalizeMessagingContact } from "@/lib/messaging-contact";
 import { getMongoAuthStorage, type AuthStorage, type AuthUserRecord } from "./auth-store";
 import { ApiError } from "./errors";
 import { verifyPassword } from "./password";
@@ -41,6 +42,8 @@ export function authUserFromRecord(record: AuthUserRecord): AuthUser {
     email: record.email,
     role: record.role,
     displayName: record.displayName,
+    ...(record.phoneContactConfiguredAt && normalizeMessagingContact(record.phoneContact)
+      ? { maskedPhone: maskMessagingContact(record.phoneContact) } : {}),
     workspaceOwnerId: workspaceOwnerId(id),
   };
 }

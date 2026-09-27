@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Client, Wallet, isValidClassicAddress } from "xrpl";
+import { Client, Wallet, isValidClassicAddress, xrpToDrops } from "xrpl";
 import { XRPL_TESTNET_URL } from "../src/lib/integrations/xrpl-testnet";
 
 const destination = path.resolve(".env.local");
@@ -54,6 +54,13 @@ async function setup() {
     await client.connect();
     const info = await client.request({ command: "server_info" });
     if (info.result.info.network_id !== 1) throw new Error("Unexpected ledger network");
+    const reserves = info.result.info.validated_ledger;
+    if (!reserves || !Number.isFinite(reserves.reserve_base_xrp) || !Number.isFinite(reserves.reserve_inc_xrp)) {
+      throw new Error("Validated reserve data required");
+    }
+    const requiredBalance = (label: string, ownerCount: number) => BigInt(xrpToDrops(reserves.reserve_base_xrp))
+      + BigInt(ownerCount) * BigInt(xrpToDrops(reserves.reserve_inc_xrp))
+      + (label === "Tenant" ? BigInt(xrpToDrops(amount)) + 1000n : 0n);
 
     const seed = setting("XRPL_TENANT_SEED");
     const existingSource = setting("XRPL_TENANT_ADDRESS");
@@ -75,13 +82,15 @@ async function setup() {
       let funded = false;
       try {
         const account = await client.request({ command: "account_info", account: wallet.classicAddress, ledger_index: "validated" });
-        funded = account.result.validated === true && BigInt(account.result.account_data.Balance) > 0n;
+        funded = account.result.validated === true && BigInt(account.result.account_data.Balance)
+          >= requiredBalance(label, account.result.account_data.OwnerCount);
       } catch (error) {
         if ((error as { data?: { error?: string } }).data?.error !== "actNotFound") throw error;
       }
       if (!funded) await client.fundWallet(wallet, { usageContext: "RentEscrow NYC Testnet hackathon setup" });
       const verified = await client.request({ command: "account_info", account: wallet.classicAddress, ledger_index: "validated" });
-      if (verified.result.validated !== true || BigInt(verified.result.account_data.Balance) <= 0n) throw new Error("Funding not validated");
+      if (verified.result.validated !== true || BigInt(verified.result.account_data.Balance)
+        < requiredBalance(label, verified.result.account_data.OwnerCount)) throw new Error("Insufficient validated funding after reserves and fee");
       console.log(`${label} Testnet wallet funded: ${wallet.classicAddress}`);
     }
     await persist({ XRPL_SETTLEMENT_ENABLED: "true" });

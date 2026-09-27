@@ -1,204 +1,241 @@
-# XRP implementation and judge walkthrough
+# RentEscrow XRPL integration and judge walkthrough
 
-Reviewed against the 27-page `xrp prompt.pdf` supplied on September 26, 2026.
-The existing repair workflow, USD escrow, deterministic policy, audit, APIs,
-persistence and UI were extended. The document explicitly permits a real XRP
-Payment beneath simulated escrow when native escrow would complicate the MVP.
-That is the implemented path: **simulated USD escrow + real Testnet Payment**.
+RentEscrow uses a **real XRPL Testnet `Payment`** to settle an enabled case.
+The application's **$400 simulated USD dispute** remains independent of the
+**10 Test XRP payment**. There is no currency conversion, real rent transfer,
+or claim that the application created a native XRPL escrow. The existing
+native `EscrowCreate` / `EscrowFinish` operator tooling remains separate.
 
-## Verified on-chain result
+## What was already working
 
-A real transaction was submitted through the application's session-scoped HTTP
-actions and independently retrieved from XRPL Testnet afterward.
+The existing adapter already constructed a server-owned Payment, rechecked the
+final transaction before signing, used `submitAndWait`, checked validated
+`tesSUCCESS` and exact delivered amount, and journaled the hash before dispatch.
+Local and MongoDB wallet/session locks, replay protection, read-only
+reconciliation, attack demos, and the Testnet wallet setup command existed.
 
-| Field | Verified value |
+The earlier transaction was independently retrieved from Testnet during this
+review: [F8C6344C…9335C6A](https://testnet.xrpl.org/transactions/F8C6344CEDE732132C7D925AA685C021AC286EA8B17EBF750C8039D4D9335C6A),
+ledger **21076716**, validated `tesSUCCESS`, **10,000,000 drops** delivered.
+The application had performed a real transaction; it was not solely a mock.
+
+The current MongoDB UI nevertheless incorrectly marked settlement unavailable,
+and payment required a separate manual approval after repair confirmation.
+
+## What was finished
+
+- Corrected XRPL availability for the existing MongoDB lock/journal path.
+- Added explicit case-scoped agent authorization. After authorization, repair
+  verification and tenant confirmation trigger a server-side settlement agent.
+  Its request contains only `{ caseId, action: "settle_xrpl" }`. The existing
+  deterministic payment boundary supplies and checks all financial fields.
+- Pinned tenant and landlord identities plus the original case beneficiary to
+  the settlement permission, policy, journal and hashed transaction memo.
+  Authenticated cases require an assigned landlord. Legacy domain fixtures use
+  their trusted owner and original beneficiary identifiers. Old unsubmitted
+  permissions can explicitly refresh participant authorization without changing
+  payment terms; historical pending/validated receipts retain their original binding.
+- Persisted full approved/rejected policy decisions and the requesting actor.
+  The durable journal includes the final policy, check time, and live balance,
+  reserve, fee and exact transaction checks. The UI exposes policy decisions.
+- Corrected audit provenance for signed-but-unsubmitted failures and manual
+  retries after an agent attempt. The agent never automatically retries a failed,
+  denied, interrupted, pending or validated attempt.
+- Improved setup to refill accounts when they cannot cover the approved payment
+  plus reserves and the fee cap, rather than treating any positive balance as enough.
+- Added a non-destructive sample-case preparation command. It preserves existing
+  cases, does not send messages, and does not sign or submit a transaction.
+
+Photon, Gemini, Nessie, authentication, and unrelated UI behavior were not changed.
+
+## Verified autonomous transaction
+
+A fresh demonstration was executed through authenticated tenant and assigned
+landlord HTTP actions. The agent was authorized before repair completion. The
+last client action was `confirm_resolution`; there was no client `settle_xrpl`
+request for the successful payment. Live Nessie customer/account verification
+passed. The tenant's existing non-demo case was preserved.
+
+| Field | Independently verified value |
 | --- | --- |
-| Case | RE-1042 in an isolated demonstration session |
+| Case | `RE-XRP-3126B6BD` |
 | Application dispute | $400 simulated USD |
 | On-chain amount | 10 Test XRP / 10,000,000 drops |
-| Transaction type | Payment |
-| Tenant public address | `r3sYwD7h1C91HnaCiBReLae9VrcFjexAhg` |
-| Landlord public address | `rKrKcMxW7ZEvidUFGJkc9YwukjYnMCqoVT` |
-| Validated ledger | 21076716 |
+| Network / transaction | XRPL Testnet / Payment |
+| Source | `r3sYwD7h1C91HnaCiBReLae9VrcFjexAhg` |
+| Destination | `rKrKcMxW7ZEvidUFGJkc9YwukjYnMCqoVT` |
+| Ledger | **21087767** |
 | Result | `validated: true`, `tesSUCCESS`, exact delivered amount |
-| Transaction hash | `F8C6344CEDE732132C7D925AA685C021AC286EA8B17EBF750C8039D4D9335C6A` |
+| Requesting actor | `settlement_agent` |
+| Persisted policy | **33 checks passed**, MongoDB journal validated |
+| Hash | `665D5F44D63673C094FB627524A7FD8603502E9BD6AC4B6187EFC018BF2837F1` |
 
-[Inspect the transaction on the Testnet explorer](https://testnet.xrpl.org/transactions/F8C6344CEDE732132C7D925AA685C021AC286EA8B17EBF750C8039D4D9335C6A).
-The local public receipt and exported dossier are saved in ignored
-`.data/xrpl-live-receipt.json` and `.data/xrpl-live-dossier.json`.
-The session cookie is kept separately in owner-readable
-`.data/xrpl-live-session.json`; do not publish that bearer credential.
-Testnet resets can eventually remove historical transactions.
+[Open the new transaction in the XRPL Testnet explorer](https://testnet.xrpl.org/transactions/665D5F44D63673C094FB627524A7FD8603502E9BD6AC4B6187EFC018BF2837F1).
+The local public receipt and independent verification are in ignored
+`.data/xrpl-agent-receipt.json`; durable state is in the configured MongoDB
+`sessions` and `xrpl_journal` collections. No signing seed or session cookie is
+included in the receipt. All eight attack controls were blocked. An actual
+second settlement request returned HTTP 409 `SETTLEMENT_ALREADY_COMPLETED`.
 
-The app resolved the case only after this receipt validated. A second actual
-settlement request returned `SETTLEMENT_ALREADY_COMPLETED` without another
-payment. All seven other attack controls were exercised through the HTTP API
-and blocked before signing.
+## Environment and wallet setup
 
-## Setup and configuration
+This workspace already has funded wallets, a valid Testnet configuration,
+MongoDB, and a live Nessie binding. No additional XRPL environment variables are
+needed here. Secrets remain in ignored, untracked, owner-readable `.env.local`
+(mode 0600); seeds are never logged or returned to the browser.
 
-The repository already depended on `xrpl`; the locked `xrpl.js` 4.6.0 was reused.
-No new dependency was added. Existing dependencies were installed from the lockfile.
+To create/fund dedicated Testnet wallets on another setup, or refill these:
 
 ```sh
-pnpm install --frozen-lockfile
 pnpm xrpl:setup-testnet
+```
+
+Equivalent without pnpm: `npm run xrpl:setup-testnet`. The command preserves
+existing wallets and unrelated environment values and writes the configuration
+below to `.env.local`. The recipient never signs, so no landlord seed is stored.
+Restart the app after configuration changes.
+
+| Variable | Required value / purpose |
+| --- | --- |
+| `XRPL_SETTLEMENT_ENABLED` | `true` |
+| `XRPL_NETWORK` | `testnet` only |
+| `XRPL_RPC_URL` | `wss://s.altnet.rippletest.net:51233` only |
+| `XRPL_TENANT_ADDRESS` | Dedicated source public address |
+| `XRPL_TENANT_SEED` | Source signing seed, server-side `.env.local` only |
+| `XRPL_LANDLORD_ADDRESS` | Dedicated approved recipient public address |
+| `XRPL_SETTLEMENT_AMOUNT_XRP` | `10` for this demo; positive, at most 100 |
+| `RENTESCROW_STORAGE` | `mongodb` for the authenticated application |
+| `MONGODB_URI`, `MONGODB_DATABASE` | Existing application database configuration |
+
+Existing Nessie configuration is reused, including its tenant/customer/account
+binding. Configured Nessie failures block settlement; there is no live-to-demo
+fallback. When Nessie is explicitly disabled, the application labels its local
+financial fixture. Neither bank balance nor simulated USD funds Test XRP.
+
+The old `XRPL_TESTNET_*` variables are for independent native escrow tooling and
+are not required by this Payment flow.
+
+## Exact judge demonstration
+
+The already completed case can be inspected immediately in tenant 1's workspace:
+select `RE-XRP-3126B6BD`, then **Escrow**, inspect **Settlement complete**, expand
+**Policy decision: approved**, and open the hash. Attack controls remain usable.
+
+For another complete run, prepare a fresh sample without resetting history.
+`--reported` records a clearly labeled sample landlord completion through the
+existing assigned-role service. It leaves evidence verification, tenant confirmation
+and all payment authorization incomplete, and sends no external messages:
+
+```sh
+pnpm xrpl:prepare-demo --reported
 pnpm dev
 ```
 
-If dependencies are installed and pnpm is unavailable, use
-`npm run xrpl:setup-testnet` and `npm run dev`.
+1. Open `http://127.0.0.1:3000`. Sign in as `tenant1@rentescrow.demo` with
+   `TenantDemo123!`. Select the new **XRPL agent demo: no heat** case whose ID
+   the preparation command printed.
+2. Open **Escrow**. Click **Set aside $400**, then **Enable Testnet settlement**.
+   Show the distinct $400 USD and 10 Test XRP figures and pinned public wallets.
+3. Click **Review agent authorization**. Review the exact source, recipient,
+   case, Testnet network and amount. Click **Authorize agent settlement**.
+   Show **Agent settlement authorized**. It has not yet requested a payment.
+4. Show the checked **Repair reported complete** requirement: the preparation
+   command added only that labeled sample report. Verification and tenant
+   confirmation are still unchecked, and no transaction has been requested.
+5. Open **Evidence**,
+   and click **Add after photo**. On the new 72°F sample, click **Analyze evidence** if it
+   is not already analyzed. Click **Verify repair**. Evidence remains explicitly
+   labeled sample/demo data, while the resulting Testnet payment is real.
+6. Open **Escrow**. Click **Confirm repair is complete**. This final tenant
+   condition triggers the already-authorized agent. It rebuilds the payment from
+   trusted case state, runs policy, signs server-side, and waits for validation.
+   No additional payment-approval click is required.
+7. Wait for **Settlement complete**, `tesSUCCESS`, ledger index and the linked
+   transaction hash. Show **Agent requested settlement** and the persisted
+   **Requested by settlement agent** audit row and policy decision.
+8. Under **Compromised-agent demos**, click each attack below. Show the failing
+   check, attempted versus approved values, and **Nothing signed. Nothing submitted.**
 
-Setup checks that `.env.local` is ignored and untracked before generating any
-credential. It creates dedicated wallets, uses the official Testnet faucet,
-preserves unrelated environment settings and existing wallets, and atomically
-writes `.env.local` with owner-only permissions. It persists the tenant seed
-before faucet calls so partial funding can resume without replacing the wallet.
-Only the landlord's public address is stored because the recipient never signs.
-Seeds are never printed, returned to the browser, or placed in examples/source.
-Wallet creation happens only when this command runs, never on application startup.
+If already verified and confirmed when authorization is granted, the agent runs
+immediately. The original manual **Review … payment → Approve Testnet payment**
+path remains available for cases without agent authorization.
 
-| Variable | Purpose |
-| --- | --- |
-| `XRPL_SETTLEMENT_ENABLED=true` | Enable the optional application Payment path |
-| `XRPL_NETWORK=testnet` | Only accepted network |
-| `XRPL_RPC_URL=wss://s.altnet.rippletest.net:51233` | Only accepted endpoint |
-| `XRPL_TENANT_ADDRESS` | Dedicated tenant public address |
-| `XRPL_TENANT_SEED` | Server-only tenant signing seed in ignored `.env.local` |
-| `XRPL_LANDLORD_ADDRESS` | Dedicated recipient public address |
-| `XRPL_SETTLEMENT_AMOUNT_XRP=10` | Positive amount, up to six decimal places, capped at 100 Test XRP |
-| `RENTESCROW_STORAGE=local` | Required for this single-host live settlement implementation |
+**Current unrelated workspace blockers:** full typecheck/build are blocked by
+an existing import of missing `src/components/landlord-operations.tsx`, plus
+`pendingMaintenanceRequest` references missing from `CaseRecord` in messaging
+code/tests. The tenant-only walkthrough above remains usable. To demonstrate a landlord
+clicking the report, omit `--reported`, restore the unrelated landlord UI dependency,
+then sign in as `landlord@rentescrow.demo` / `LandlordDemo123!` in a private window,
+open **Open cases → select case → Repairs**, enter a completion note and click
+**Report repair complete** before tenant verification. The live run above exercised
+that authenticated API successfully. These unrelated files were left untouched
+per the requested scope.
 
-Restart the server after changing configuration. Enabling Testnet on a case pins
-the wallets and amount to that case. Later configuration changes cannot rewrite
-the existing authorization; a mismatch blocks signing. `XRPL_TESTNET_*` variables
-belong to the older, separate native escrow operator tooling and are not required
-for the application Payment flow.
+## Attacks and deterministic policy
 
-## Successful judge demonstration
-
-1. Open a fresh workspace at `http://127.0.0.1:3000`. Inspect RE-1042, its 54 F
-   sample evidence and $400 simulated dispute.
-2. Open **Escrow**, set aside **$400**, and click **Enable Testnet settlement**.
-   Show the pinned tenant/landlord public wallets and separate **10 Test XRP**.
-3. In **Messages**, use the sample **Report repair complete** action.
-4. In **Evidence**, add the after-repair sample, analyze it, and verify the repair.
-   The 72 F sample and its analysis stay explicitly labeled demonstration data.
-5. In **Escrow**, click **Confirm repair is complete**.
-6. Review the Test XRP payment. The dialog shows the exact amount, recipient,
-   network and case. Approve the Testnet payment.
-7. Wait for validation. Show `tesSUCCESS`, ledger index and the explorer-linked
-   hash. The simulated USD escrow closes and the case becomes resolved.
-
-This is a real Testnet `Payment`; the application does not claim that an
-`EscrowCreate`/`EscrowFinish` occurred. The $400, case records, sample landlord
-reply and sample evidence analysis remain simulated. Test XRP has no real value
-and no exchange-rate relationship to the $400 dispute. Production Gemini evidence
-can still be used when configured; a key is not needed for the labeled sample demo.
-
-## Compromised-agent demonstrations
-
-In the same Escrow tab, the controls under **Compromised-agent demos** remain
-available after settlement. Every control is a dry run; none calls the signer.
-
-| Control | Attempt | Policy result |
+| Control | Attempt | Rejection |
 | --- | --- | --- |
-| Wallet switch | Replace recipient with `rATTACKER999` | `DESTINATION_WALLET_MISMATCH` |
+| Wallet switch | Substitute recipient | `DESTINATION_WALLET_MISMATCH` |
 | Amount tampering | Request 1,000 Test XRP | `AMOUNT_OUTSIDE_AUTHORIZATION` |
-| Prompt injection | Malicious repair message directs payment to attacker | Override blocked; trusted destination preserved |
-| Insufficient funds | Inject zero spendable balance | `INSUFFICIENT_XRPL_FUNDS` |
-| Replay payment | Simulate an already-completed settlement | `SETTLEMENT_ALREADY_COMPLETED` |
 | Wrong network | Request Mainnet | `WRONG_NETWORK` |
-| Wrong case | Use an unrelated case identifier | `WRONG_CASE` |
-| Unsupported action | Request arbitrary transfer/account action | `ACTION_OUTSIDE_PERMISSION_SCOPE` |
+| Prompt injection | Repair text orders an attacker payment | `DESTINATION_WALLET_MISMATCH` |
+| Wrong case | Unrelated case identifier | `WRONG_CASE` |
+| Unsupported action | Arbitrary transfer/account action | `ACTION_OUTSIDE_PERMISSION_SCOPE` |
+| Insufficient funds | Inject zero spendable balance | `INSUFFICIENT_XRPL_FUNDS` |
+| Replay payment | Pretend already settled | `SETTLEMENT_ALREADY_COMPLETED` |
 
-The UI shows the failed checks, attempted versus authorized values and
-**Nothing signed. Nothing submitted.** Real execution failures that may already
-have been submitted show pending/reconciliation state instead. The insufficient
-funds control explicitly uses an injected balance; real execution independently
-queries the validated account and deducts the actual reserves plus fee before
-checking the approved payment amount.
+These controls are dry runs and never invoke a signer. The real executor
+independently checks source balance minus current reserves and the final fee.
+Actual duplicate requests are also blocked by durable receipt/journal state.
 
-## Guardrails and recovery
+The policy checks case/escrow/settlement identity, session ownership, pinned
+participants, current customer/account ownership, funded USD record, repair
+report, analyzed before/after evidence, successful verification, tenant
+confirmation, exact Test XRP amount/spending limit, approved destination,
+Testnet-only permission, `Payment` only, and no previous or unresolved settlement.
 
-The session must own the case. The backend builds payment intent from pinned
-case state; the API accepts only an action/scenario, never wallets, amounts,
-network, transaction JSON or a signing seed. The existing release policy checks
-funded simulated escrow, repair report, analyzed evidence, successful comparison
-and tenant confirmation. XRP checks add tenant/source/recipient/amount/permission
-binding and reject completed or unresolved attempts. Optional trusted normalized
-financial fields can enforce tenant/customer/account binding and readiness
-without coupling the signer to Nessie's API.
+Immediately before signing, the executor rechecks the fresh case and exact
+autofilled transaction. It rejects extra transaction fields, partial payments,
+altered wallets/amounts, fees above 1,000 drops, and excessive ledger expiry.
+The server must attest Testnet network ID 1. The signed blob is checked again
+before submission. Only matching validated `tesSUCCESS` with exact delivered
+amount releases the simulated USD record. Policy decisions and ledger metadata
+remain in the case audit and durable journal.
 
-Immediately before signing, the adapter reloads the case, rechecks policy/config
-and validates the exact autofilled transaction. It rejects extra fields, partial
-payments, altered amounts/wallets, fees above 1,000 drops and expiry more than
-25 ledgers away. A hashed permission binding associates the payment with the
-tenant, case, escrow and settlement without publishing tenant details. The
-signed transaction is decoded and checked again before submission. The pinned
-server must attest Testnet network ID 1.
+## Recovery and verification
 
-The session and shared source wallet are serialized using cross-process file
-locks. A fsynced journal reserves the signed hash **before** dispatch; the session
-is also checkpointed. Success is journaled before the final case update. A
-timeout, missing transaction, invalid receipt, failed ledger result or lost
-session write cannot create a successful settlement or silently authorize a new
-payment. A pending hash blocks replay and case/evidence edits, including when the
-session checkpoint was lost. The exact delivered amount must match the approved
-amount, in addition to a matching hash and validated `tesSUCCESS`.
+Session and wallet locks serialize signing; MongoDB locks do not expire into a
+second signer. The signed hash is durably reserved before dispatch. Unknown,
+failed or lost responses never count as settlement. Use **Reconcile ledger
+result** to retrieve the recorded hash without signing or submitting again.
+Never delete a pending journal to retry. A stale process lock requires operator
+inspection of the journal and ledger before removal. Preserve case and journal
+storage together. A validated case cannot be reset or paid again.
 
-Use **Reconcile ledger result** for pending outcomes. Reconciliation only queries
-the recorded hash and applies a validated receipt; it never signs or submits.
-Unresolved/failed hashes remain reserved and require operator review. There is
-no automatic new-sequence retry. A process crash can leave an explicit lock in
-`.data/locks`; after confirming the owning process stopped, an operator can
-remove only that lock and reconcile the journal. Never delete a journal to retry.
-Keep `.data/sessions` and `.data/xrpl-journal` together in backups.
+In the Testnet explorer, verify the transaction's **Payment** type, source and
+destination above, **10 XRP** amount, successful validated result and ledger
+**21087767**. This is Testnet, not Mainnet. Testnet ledger history can be reset;
+the saved public receipt and durable journal preserve the demonstration metadata.
 
-Reset is blocked for pending or validated Testnet cases so their audit receipts
-are preserved. Use a new case or browser session for another demonstration.
-
-## Files and verification
-
-| Area | Files |
-| --- | --- |
-| Wallet setup | `scripts/xrpl-setup-testnet.ts`, `package.json`, `.env.example` |
-| Payment adapter and shared transaction checks | `src/lib/integrations/xrpl-settlement.ts`, `xrpl-testnet.ts`, `index.ts` |
-| Domain policy/types | `src/lib/policy.ts`, `src/lib/types.ts` |
-| Actions, persistence, errors, journal | `src/lib/server/cases.ts`, `store.ts`, `xrpl-journal.ts`, `errors.ts`, `http.ts`, `validation.ts` |
-| Existing workspace UI | `src/components/case-panels.tsx`, `rent-workspace.tsx`, `src/app/globals.css` |
-| New regression tests | `tests/xrpl-settlement.test.ts`, `tests/xrpl-server.test.ts`, `tests/e2e/xrpl.spec.ts` |
-| Documentation | `README.md`, this walkthrough, integration notes and implementation contract |
-
-Verification includes TypeScript, production build, 46 unit/integration tests,
-15 browser tests, the real Payment above, independent ledger receipt retrieval,
-and a rejected duplicate actual settlement request. The browser XRP tests use
-mocked ledger responses; routine tests never send real ledger transactions.
+Checks run:
 
 ```sh
+node --conditions=react-server --import tsx --test \
+  tests/xrpl-settlement.test.ts tests/xrpl-server.test.ts \
+  tests/xrpl-journal.test.ts tests/mongodb-xrpl.test.ts tests/policy.test.ts \
+  tests/xrpl-agent.test.ts tests/xrpl-status.test.ts
+pnpm test:e2e tests/e2e/xrpl.spec.ts
 pnpm typecheck
-pnpm test
 pnpm build
-XRPL_SETTLEMENT_ENABLED=false pnpm test:e2e
 ```
 
-## Remaining boundaries
-
-- This is a loopback hackathon demo with MongoDB email/password users, revocable
-  login cookies, and a dedicated server-controlled Testnet wallet. The three
-  demo passwords are public; production identity provisioning and custody are outside scope.
-- MongoDB uses shared non-expiring session/wallet locks and a durable public
-  transaction journal. After a crash, inspect the journal and ledger before
-  removing a stale lock; locks never expire into a second signing attempt.
-- Native escrow builders remain separate operator tooling. The application's
-  settlement transaction is `Payment`; native escrow expiry/cancellation and
-  preimage lifecycle were deliberately not introduced into this workflow.
-- Failed/expired/unknown submitted transactions stay reserved for manual review;
-  the UI does not offer automatic replacement payments.
-- The demo uses fixed dedicated counterparty wallets from server configuration;
-  production wallet enrollment, rotation and authenticated counterparty binding
-  remain future work. No Mainnet, real rent, or legal rent-withholding determination.
+All 54 targeted XRPL/policy tests and all seven XRPL browser tests passed. Typecheck and
+build were run and exposed the unrelated blockers listed above; they are not
+reported as passing. Routine automated tests use ledger mocks and never spend
+Test XRP. The separately recorded live run used the real Testnet network and
+real configured Nessie/MongoDB connections.
 
 Protocol references: [direct Payment fields](https://xrpl.org/docs/references/protocol/transactions/types/payment),
 [reliable submission](https://xrpl.org/docs/concepts/transactions/reliable-transaction-submission),
-and [xrpl.js Client](https://js.xrpl.org/classes/Client.html).
+[xrpl.js Client](https://js.xrpl.org/classes/Client.html),
+and [official Testnet faucets](https://xrpl.org/resources/dev-tools/xrp-faucets).

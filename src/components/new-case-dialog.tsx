@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ArrowRight, Building2, CheckCircle2, Search } from "lucide-react";
+import { ArrowRight, Building2, CheckCircle2, Search, ShieldCheck } from "lucide-react";
 import { getBuildingSummary } from "@/lib/building-context";
 import type { BuildingRecord, IssueType } from "@/lib/types";
 import { DEMO_PARTICIPANTS } from "@/lib/seed";
+import { maskMessagingContact } from "@/lib/messaging-contact";
 import { Button, Modal } from "./workspace-ui";
 
 export interface NewCaseInput {
@@ -67,7 +68,7 @@ export function NewCaseDialog({ onClose, onCreate, busy }: { onClose: () => void
     const monthlyRentCents = Math.round(Number(form.get("monthlyRent")) * 100);
     const disputedAmountCents = Math.round(Number(form.get("disputedAmount")) * 100);
     if (disputedAmountCents > monthlyRentCents) { setError("The disputed amount cannot exceed your monthly rent."); return; }
-    const success = await onCreate({ issue: form.get("issue") as IssueType, description: String(form.get("description")).trim(), noticedAt: String(form.get("noticedAt")), address: address.trim(), borough, apartment: String(form.get("apartment")).trim(), landlordName: String(form.get("landlordName")).trim(), landlordContact: String(form.get("landlordContact")).trim(), monthlyRentCents, disputedAmountCents });
+    const success = await onCreate({ issue: form.get("issue") as IssueType, description: String(form.get("description")).trim(), noticedAt: String(form.get("noticedAt")), address: address.trim(), borough, apartment: String(form.get("apartment")).trim(), landlordName: String(form.get("landlordName")).trim(), landlordContact: DEMO_PARTICIPANTS.landlord.phone, monthlyRentCents, disputedAmountCents });
     if (success) onClose();
     else setError("The case could not be created. Check the details and try again.");
   }
@@ -88,10 +89,11 @@ export function NewCaseDialog({ onClose, onCreate, busy }: { onClose: () => void
         <label className="field">First noticed<input name="noticedAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} max={new Date().toISOString().slice(0, 10)} required /></label>
         <label className="field field-wide">What happened?<textarea name="description" placeholder="Describe the issue and how it affects your apartment." rows={3} minLength={10} maxLength={4000} required /></label>
         <label className="field">Landlord / property manager<input name="landlordName" value={DEMO_PARTICIPANTS.landlord.name} readOnly /></label>
-        <label className="field">Landlord contact<input name="landlordContact" type="tel" value={DEMO_PARTICIPANTS.landlord.phone} readOnly /></label>
+        <label className="field">Landlord contact<input type="text" value={maskMessagingContact(DEMO_PARTICIPANTS.landlord.phone)} aria-describedby="case-messaging-authorization" readOnly /></label>
         <label className="field">Monthly rent (USD)<input name="monthlyRent" type="number" placeholder="2400.00" min="0.01" max="100000" step="0.01" required /></label>
         <label className="field">Disputed amount (USD)<input name="disputedAmount" type="number" placeholder="600.00" min="0.01" max="100000" step="0.01" required /></label>
       </div>
+      <div id="case-messaging-authorization" className="inline-note note-neutral"><ShieldCheck size={17} /><div><strong>Repair coordination authorization</strong><p>Creating this case authorizes the Tenant Agent to send the case-bound repair request to Alex Morgan through Photon and coordinate relevant replies with the Landlord Agent. Messages cannot approve payments, change settlement details, or resolve the case.</p></div></div>
       {error && <p className="form-error" role="alert">{error}</p>}
       <div className="modal-footer"><span className="muted small">New cases use simulated funds.</span><div><Button onClick={onClose} disabled={busy}>Cancel</Button><Button type="submit" variant="primary" icon={ArrowRight} busy={busy} disabled={lookupBusy}>Create case</Button></div></div>
     </form>

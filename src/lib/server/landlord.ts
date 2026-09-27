@@ -27,7 +27,8 @@ export function toLandlordCase(user: AuthUser, record: CaseRecord): LandlordCase
       createdAt: item.createdAt, dataUrl: item.dataUrl, temperatureF: item.temperatureF,
       isDemo: item.isDemo, analysis: item.analysis, uploadedByRole: item.uploadedByRole,
     })),
-    messages: record.messages.map(({ id, sender, body, createdAt, delivery }) => ({ id, sender, body, createdAt, delivery })),
+    messages: record.messages.map(({ id, sender, body, createdAt, delivery, originatingAgent, interpretation, provider, failureReason }) =>
+      ({ id, sender, body, createdAt, delivery, originatingAgent, interpretation, provider, failureReason })),
     // Case-kind events also include expenses and imported transaction labels.
     // Evidence events can reference private receipts. Only share operational events,
     // with evidence details available through the separate receipt-free projection.
