@@ -118,9 +118,9 @@ test("live natural scheduling language reaches the safe scheduling relay", async
 test("exact short landlord decisions stay deterministic when Gemini is configured", async (t) => {
   environment(t, "offline-test-key");
   const record = scheduledRecord();
-  record.pendingMaintenanceRequest = {
-    scheduledFor: "Sep 27 at 11 AM", previousScheduledFor: "Sep 27 at 10 AM",
-    messageId: "request-1", createdAt: "2026-09-26T13:30:00.000Z",
+  record.maintenanceSchedule = {
+    scheduledFor: "Sep 27 at 11 AM", status: "reschedule_requested",
+    sourceMessageId: "request-1", updatedAt: "2026-09-26T13:30:00.000Z",
   };
   let requests = 0;
   t.mock.method(globalThis, "fetch", async () => {

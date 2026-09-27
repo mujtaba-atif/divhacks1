@@ -82,8 +82,7 @@ function dateLabelFromText(text: string, receivedAt: Date): string | undefined {
 
 function priorSchedule(record: CaseRecord): string | undefined {
   const repair = [...(record.repairs ?? [])].reverse().find((entry) => entry.kind === "scheduled" && entry.scheduledFor);
-  const raw = record.pendingMaintenanceRequest?.scheduledFor
-    ?? record.maintenanceSchedule?.scheduledFor
+  const raw = record.maintenanceSchedule?.scheduledFor
     ?? repair?.scheduledFor
     ?? [...record.messages].reverse().find((message) => message.classification?.scheduledFor)?.classification?.scheduledFor;
   if (typeof raw !== "string") return undefined;
