@@ -29,7 +29,9 @@ changing settings.
 
 Use the intended workspace's `case.ownerId` from its dashboard API response for
 the tenant binding, not a browser cookie or a randomly chosen ID. This prevents
-other anonymous sessions with the same seeded case number from sending.
+other tenant accounts from sending through the approved case binding. After the
+authentication migration, use the seeded tenant's stable workspace owner ID;
+anonymous IDs are not automatically reassigned.
 
 The RE-1042 seed and Reset demo use Mujtaba Atif (`+12018567033`) as the tenant
 and Rayyan Khan (`+19736060558`) as the landlord. Only the landlord contact is a

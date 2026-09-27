@@ -18,8 +18,8 @@ export async function POST(request: NextRequest) {
   let session: SessionContext | undefined;
   try {
     assertSameOrigin(request);
-    const input = await readJson(request, contractSchema);
     session = await getSession(request);
+    const input = await readJson(request, contractSchema);
     return respond({ contract: await createContract(session.document.ownerId, input) }, session, 201);
   } catch (error) {
     return handleError(error, session);

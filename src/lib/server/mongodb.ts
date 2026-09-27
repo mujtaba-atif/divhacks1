@@ -17,10 +17,20 @@ const runtime = globalThis as typeof globalThis & {
 };
 const connections = runtime.rentEscrowMongoConnections ??= new Map<string, Promise<Connection>>();
 
+export function mongoStorageEnabled(): boolean {
+  const mode = process.env.RENTESCROW_STORAGE || (process.env.MONGODB_URI ? "mongodb" : "local");
+  if (mode !== "local" && mode !== "mongodb") {
+    throw new ApiError(503, "RENTESCROW_STORAGE must be local or mongodb.");
+  }
+  return mode === "mongodb";
+}
+
 export async function ensureMongoIndexes(database: Db): Promise<void> {
   try {
     await Promise.all([
       database.collection("sessions").createIndex({ ownerId: 1 }, { unique: true, name: "sessions_ownerId_unique" }),
+      database.collection("nyc_buildings").createIndex({ key: 1 }, { unique: true, name: "nyc_building_address_unique" }),
+      database.collection("nyc_buildings").createIndex({ purgeAt: 1 }, { expireAfterSeconds: 0, name: "nyc_building_retention" }),
       database.collection(`${MONGO_EVIDENCE_BUCKET}.files`).createIndex(
         { "metadata.ownerId": 1, "metadata.caseId": 1, "metadata.evidenceId": 1, "metadata.sha256": 1 },
         { name: "evidence_owner_case_item_hash" },

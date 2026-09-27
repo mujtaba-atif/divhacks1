@@ -1,4 +1,5 @@
-import { expect, test, type APIRequestContext } from "@playwright/test";
+import { expect, test } from "./auth-fixtures";
+import type { APIRequestContext } from "@playwright/test";
 import type { CaseRecord, DashboardData } from "../../src/lib/types";
 import { origin } from "./environment";
 

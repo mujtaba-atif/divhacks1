@@ -6,7 +6,6 @@ import {
   classifyLandlordReply,
   getFinancialContext,
   IntegrationError,
-  lookupBuilding,
   sendLandlordMessage,
   verifyEvidence,
 } from "@/lib/integrations";
@@ -27,6 +26,7 @@ import { createNewCase } from "@/lib/seed";
 import { normalizeMessagingContact } from "@/lib/messaging-contact";
 import type {
   AuditRecord,
+  AuthUser,
   CaseAction,
   CaseMessage,
   CaseRecord,
@@ -43,6 +43,7 @@ import { ApiError } from "./errors";
 import { assignDemoParticipants } from "./demo-case";
 import {
   assertXrplStorageCapability,
+  assignCaseOwnership,
   findCase,
   mutateSession,
   updateSharedBalance,
@@ -52,6 +53,8 @@ import {
 } from "./store";
 import type { newCaseSchema } from "./validation";
 import { assertXrplWalletAvailable, readXrplJournal, recordXrplPending, recordXrplValidated } from "./xrpl-journal";
+import { requireLandlordCaseAccess } from "./case-access";
+import { getBuildingContext } from "./buildings";
 
 export type CaseActionResult = { case: CaseRecord; policy?: PolicyResult };
 interface MessagingDependencies {
@@ -116,7 +119,9 @@ function applyLandlordReply(caseRecord: CaseRecord, body: string, delivery: Case
   const reportsNewCompletion = classification.intent === "repair_complete" && !caseRecord.repairReported;
   const messageCount = reportsNewCompletion ? 2 : 1;
   if (caseRecord.messages.length + messageCount > 200) throw new ApiError(409, "This case has reached its demo message limit.");
-  const message: CaseMessage = { id: randomUUID(), sender: "landlord", body, createdAt: now(), delivery, classification };
+  // These replies are stored application events, never an unconfirmed external
+  // delivery. Marking that explicitly lets the isolated demo workspace reset.
+  const message: CaseMessage = { id: randomUUID(), sender: "landlord", body, createdAt: now(), delivery, provider: "demo", classification };
   caseRecord.messages.push(message);
   const title = classification.intent === "scheduled" && classification.scheduledFor
     ? `Maintenance scheduled for ${classification.scheduledFor}`
@@ -434,11 +439,12 @@ function simulateSigningBoundary(caseRecord: CaseRecord, intent: Readonly<Transa
 }
 
 export async function createCase(ownerId: string, input: z.infer<typeof newCaseSchema>) {
-  const building = await lookupBuilding(input.address, input.borough);
+  const building = { ...await getBuildingContext(input.address, input.borough), address: input.address, borough: input.borough };
   return mutateSession(ownerId, async (document) => {
     await assertSessionNoPendingSettlement(document);
     if (document.cases.length >= 20) throw new ApiError(409, "This demo allows up to 20 cases per session.");
     const caseRecord = assignDemoParticipants(createNewCase(ownerId, { ...input, building }));
+    assignCaseOwnership(document, caseRecord);
     caseRecord.accountBalanceCents = document.accountBalanceCents;
     document.cases.push(caseRecord);
     return caseRecord;
@@ -451,7 +457,7 @@ export async function createContractCase(
   input: z.infer<typeof newCaseSchema>,
   contractId: string,
 ) {
-  const building = await lookupBuilding(input.address, input.borough);
+  const building = { ...await getBuildingContext(input.address, input.borough), address: input.address, borough: input.borough };
   return mutateSession(ownerId, async (document) => {
     await assertSessionNoPendingSettlement(document);
     if (document.cases.length >= 20) throw new ApiError(409, "This demo allows up to 20 cases per session.");
@@ -460,10 +466,12 @@ export async function createContractCase(
       throw new ApiError(409, "A fully accepted unused contract is required before creating a case.");
     }
     const caseRecord = createNewCase(ownerId, { ...input, building });
+    assignCaseOwnership(document, caseRecord);
     caseRecord.case_type = contract.case_type;
     if (contract.case_type === "self_documentation") {
       // No destination wallet is recorded or approved for a tenant-only case.
       caseRecord.escrow.destination = "";
+      delete caseRecord.landlordUserId;
     }
     caseRecord.accountBalanceCents = document.accountBalanceCents;
     document.cases.push(caseRecord);
@@ -479,6 +487,10 @@ export async function addUploadedEvidence(ownerId: string, caseId: string, evide
     await assertNoPendingSettlement(caseRecord);
     assertMutable(caseRecord);
     assertCapacity(caseRecord);
+    if (document.tenantUserId) {
+      evidence.uploadedByRole = "tenant";
+      evidence.uploadedByUserId = document.tenantUserId;
+    }
     caseRecord.evidence.push(evidence);
     invalidateVerification(caseRecord);
     event(caseRecord, "Evidence uploaded", `${evidence.name} added as ${evidence.stage} evidence.`, "evidence");
@@ -486,6 +498,69 @@ export async function addUploadedEvidence(ownerId: string, caseId: string, evide
     await mutation.checkpoint();
     await analyzeAndRecordEvidence(caseRecord, evidence);
     return caseRecord;
+  });
+}
+
+export type LandlordAction =
+  | { action: "message"; body: string }
+  | { action: "schedule"; scheduledFor: string; notes: string }
+  | { action: "report_complete"; notes: string };
+
+/** The role is rechecked inside the same serialized mutation as case assignment. */
+export async function performLandlordAction(ownerId: string, caseId: string, user: AuthUser, action: LandlordAction) {
+  return mutateSession(ownerId, async (document) => {
+    const record = findCase(document, caseId);
+    requireLandlordCaseAccess(user, record);
+    await assertSessionNoPendingSettlement(document);
+    assertMutable(record);
+    const repairs = record.repairs ??= [];
+    if (repairs.length >= 200) throw new ApiError(409, "This case has reached its repair action limit.");
+    if (action.action === "message") {
+      // Untrusted text is communication only. Structured actions control repair status.
+      applyLandlordReply(record, action.body, "received", {
+        intent: "other", summary: "Message from the assigned property manager.", source: "rules",
+      });
+    } else if (action.action === "schedule") {
+      if (record.repairReported) throw new ApiError(409, "The repair is awaiting tenant verification.");
+      repairs.push({ id: randomUUID(), caseId, landlordUserId: user.id, kind: "scheduled",
+        createdAt: now(), scheduledFor: action.scheduledFor, notes: action.notes });
+      applyLandlordReply(record, action.notes, "received", {
+        intent: "scheduled", scheduledFor: action.scheduledFor, summary: "Maintenance scheduled by the assigned property manager.", source: "rules",
+      });
+    } else {
+      if (record.repairReported) return record;
+      repairs.push({ id: randomUUID(), caseId, landlordUserId: user.id, kind: "reported_complete",
+        createdAt: now(), notes: action.notes,
+        evidenceId: record.evidence.filter((item) => item.uploadedByUserId === user.id).at(-1)?.id });
+      applyLandlordReply(record, action.notes, "received", {
+        intent: "repair_complete", summary: "The assigned property manager reported the repair complete.", source: "rules",
+      });
+    }
+    return record;
+  });
+}
+
+export async function addLandlordEvidence(ownerId: string, caseId: string, user: AuthUser, upload: EvidenceRecord) {
+  return mutateSession(ownerId, async (document, mutation) => {
+    const record = findCase(document, caseId);
+    requireLandlordCaseAccess(user, record);
+    await assertSessionNoPendingSettlement(document);
+    assertMutable(record);
+    if (record.verification?.verified || record.tenantConfirmed) {
+      throw new ApiError(409, "Tenant verification is already complete. Send a case message to discuss any further evidence.", false, "TENANT_VERIFICATION_PRESERVED");
+    }
+    assertCapacity(record);
+    if ((record.repairs?.length ?? 0) >= 200) throw new ApiError(409, "This case has reached its repair action limit.");
+    // Landlord uploads can never satisfy the tenant's before/after evidence requirement.
+    const evidence: EvidenceRecord = { ...upload, stage: "other", uploadedByRole: "landlord", uploadedByUserId: user.id };
+    record.evidence.push(evidence);
+    (record.repairs ??= []).push({ id: randomUUID(), caseId, landlordUserId: user.id, kind: "evidence_uploaded",
+      createdAt: now(), notes: evidence.note, evidenceId: evidence.id });
+    invalidateVerification(record);
+    event(record, "Property manager uploaded repair evidence", evidence.name, "evidence");
+    await mutation.checkpoint();
+    await analyzeAndRecordEvidence(record, evidence);
+    return record;
   });
 }
 
@@ -638,7 +713,10 @@ async function applyAction(
       if (caseRecord.issue !== "heating") {
         throw new ApiError(409, "The provided sample evidence demonstrates a heating repair. Upload evidence for this issue.");
       }
-      if (caseRecord.evidence.some((item) => item.isDemo && item.stage === action.stage)) return { case: caseRecord };
+      const completionAt = action.stage === "after"
+        ? caseRecord.repairs?.filter((item) => item.kind === "reported_complete").at(-1)?.createdAt : undefined;
+      if (caseRecord.evidence.some((item) => item.isDemo && item.stage === action.stage
+        && (!completionAt || Date.parse(item.createdAt) >= Date.parse(completionAt)))) return { case: caseRecord };
       assertCapacity(caseRecord);
       const isAfter = action.stage === "after";
       const evidence: EvidenceRecord = {
@@ -648,6 +726,7 @@ async function applyAction(
         note: isAfter ? "Sample heating repair evidence: indoor temperature 72 F." : "Sample heating issue evidence: indoor temperature 54 F.",
         createdAt: now(), temperatureF: isAfter ? 72 : 54, isDemo: true,
         dataUrl: isAfter ? "/evidence-after.png" : "/evidence-before.png",
+        ...(document.tenantUserId ? { uploadedByRole: "tenant" as const, uploadedByUserId: document.tenantUserId } : {}),
       };
       caseRecord.evidence.push(evidence);
       invalidateVerification(caseRecord);
@@ -714,6 +793,10 @@ async function applyAction(
       const afterEvidence = caseRecord.evidence.filter((item) => item.stage === "after").at(-1);
       if (!afterEvidence?.analysis) {
         throw new ApiError(409, "Upload and analyze after-repair evidence before verifying the repair.");
+      }
+      const completion = caseRecord.repairs?.filter((item) => item.kind === "reported_complete").at(-1);
+      if (afterEvidence.uploadedByRole === "landlord" || (completion && Date.parse(afterEvidence.createdAt) < Date.parse(completion.createdAt))) {
+        throw new ApiError(409, "Add tenant after-repair evidence captured after the property manager reported completion.");
       }
       if (caseRecord.verification?.verified) return { case: caseRecord };
       const verification = await verifyEvidence(caseRecord);
@@ -928,6 +1011,18 @@ export async function receiveLandlordMessage(ownerId: string, caseId: string | u
 }
 
 export async function performCaseAction(ownerId: string, caseId: string, action: CaseAction, messaging = defaultMessaging) {
-  if (action.action === "enable_xrpl") assertXrplStorageCapability();
-  return mutateSession(ownerId, (document, mutation) => applyAction(document, findCase(document, caseId), action, mutation, messaging));
+  return mutateSession(ownerId, (document, mutation) => {
+    const caseRecord = findCase(document, caseId);
+    if (document.tenantUserId && (action.action === "simulate_landlord_reply" || action.action === "record_landlord_reply")) {
+      throw new ApiError(403, "Landlord replies and repair reports must come from the assigned property manager.", false, "ROLE_NOT_ALLOWED");
+    }
+    const xrplAction = action.action === "enable_xrpl" || action.action === "settle_xrpl"
+      || action.action === "reconcile_xrpl" || action.action === "xrpl_security_demo";
+    if (xrplAction && document.tenantUserId && document.xrplAuthorized !== true) {
+      throw new ApiError(403, "This tenant workspace is not authorized to use the configured XRPL signer.", false,
+        "XRPL_ACCOUNT_NOT_AUTHORIZED");
+    }
+    if (action.action === "enable_xrpl") assertXrplStorageCapability();
+    return applyAction(document, caseRecord, action, mutation, messaging);
+  });
 }

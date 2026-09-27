@@ -1,4 +1,5 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./auth-fixtures";
+import { origin } from "./environment";
 
 const caseInput = {
   issue: "heating", description: "The radiator has stopped producing heat in this apartment.",
@@ -7,18 +8,28 @@ const caseInput = {
   monthlyRentCents: 300_000, disputedAmountCents: 40_000,
 };
 
-test("self-documentation policy rejects and audits an empty-destination transfer via HTTP", async ({ request, baseURL }) => {
-  const origin = new URL(baseURL!).origin;
-  const tenant = await request.post("/api/auth/register", {
+test("registration is unavailable and a tenant cannot accept as a landlord", async ({ request }) => {
+  const registration = await request.post("/api/auth/register", {
     headers: { Origin: origin }, data: { role: "tenant", displayName: "Taylor Tenant", walletAddress: "rTENANT789" },
   });
-  expect(tenant.ok(), await tenant.text()).toBeTruthy();
+  expect(registration.status()).toBe(404);
+
+  const bilateral = await request.post("/api/contracts", {
+    headers: { Origin: origin }, data: { case_type: "bilateral", terms: "Bilateral repair terms." },
+  });
+  expect(bilateral.status()).toBe(409);
+  expect((await bilateral.json()).code).toBe("BILATERAL_CONTRACT_UNAVAILABLE");
 
   const contractResponse = await request.post("/api/contracts", {
     headers: { Origin: origin }, data: { case_type: "self_documentation", terms: "Tenant-only documentation terms." },
   });
   expect(contractResponse.ok(), await contractResponse.text()).toBeTruthy();
   const contract = (await contractResponse.json()).contract;
+
+  const roleEscalation = await request.post(`/api/contracts/${contract.id}/accept`, {
+    headers: { Origin: origin }, data: { role: "landlord" },
+  });
+  expect(roleEscalation.status()).toBe(403);
 
   const created = await request.post("/api/contracts/cases", {
     headers: { Origin: origin }, data: { contractId: contract.id, case: caseInput },

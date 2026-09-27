@@ -28,6 +28,7 @@ Run the connection check, then restart the application so it loads the new envir
 
 ```sh
 pnpm db:check
+pnpm seed:users
 pnpm dev
 ```
 
@@ -39,9 +40,14 @@ When MongoDB storage is selected, failures are reported to the application. Ther
 
 | Collection | Contents |
 | --- | --- |
-| `sessions` | Session ownership, cases, addresses, landlord contacts, messages, expenses, rent records, escrow audit history, evidence metadata, and file references |
+| `users` | Three seeded users, normalized email, bcrypt password hash, role, display name, timestamps |
+| `auth_sessions` | Hashed opaque login tokens, user references, expiry, and creation time |
+| `sessions` | Stable tenant workspace ownership, cases, assignments, repair actions, messages, expenses, rent records, escrow audit history, evidence metadata, and file references |
+| `properties` | Managed demo property and landlord assignment |
 | `evidence.files` | GridFS file metadata, including owner/case/evidence binding, byte length, MIME type, and SHA-256 integrity information |
 | `evidence.chunks` | Uploaded image and PDF bytes |
+| `operation_locks` | Non-expiring session/wallet locks, released only by their acquiring token |
+| `xrpl_journal` | Public pending/validated transaction metadata and durable receipts |
 
 Uploaded documents, including supported filing PDFs, are persisted in Atlas when attached to a case. This does not create a separate court-filing submission workflow. Bundled public demo images and application code remain static application assets, not user uploads.
 
@@ -51,9 +57,9 @@ Current application limits are 5 MiB per uploaded PNG, JPEG, WebP, or PDF; 32 Mi
 
 ## Existing Local Data and User Identity
 
-Switching `RENTESCROW_STORAGE` does **not** automatically import `.data/sessions` files. Existing local data is retained on disk. An existing browser session that has no matching Atlas record starts a new session. Export any cases you need before switching, and plan an explicit, backed-up migration if existing records must move into Atlas. Do not bulk overwrite Atlas session documents or merge owners without a reviewed migration.
+Switching `RENTESCROW_STORAGE` does **not** automatically import `.data/sessions` files. Existing local data is retained on disk. Anonymous cookies no longer grant access. The user seed creates separately owned demo workspaces; migrate older records only through an explicit, validated process.
 
-The current application identifies owners using a secure browser-session cookie, not registered accounts. Its cookie expires after 30 days, and losing it loses access to that session even though Atlas still retains the records. Atlas persistence does not provide sign-in, password recovery, cross-device access, or automatic deletion. Add authenticated user identity and an explicit retention policy before accepting production tenant records.
+The application now identifies users through MongoDB email/password accounts and revocable 30-day login sessions. Cases belong to stable user IDs, so signing in again restores the same workspace. See [authentication and roles](auth-and-roles.md) for seeding, collections, permissions, and the full demonstration. Password recovery and automatic case deletion are not implemented.
 
 Reverting to local storage is a configuration rollback only; it does not move Atlas records back to disk. Preserve both data sets and use an explicit migration if records need to be consolidated.
 
@@ -61,7 +67,7 @@ Reverting to local storage is a configuration rollback only; it does not move At
 
 The Atlas Free cluster currently has 0.5 GB of total storage, including indexes, and no managed backups. It is intended here for development, not as the sole durable archive for sensitive filings. Monitor capacity, select a backup-capable tier when needed, and validate restoration before relying on the deployment. See the official [Free cluster limits](https://www.mongodb.com/docs/atlas/reference/free-shared-limitations/) and [backup documentation](https://www.mongodb.com/docs/atlas/backup-restore-cluster/).
 
-A backup must include `sessions`, `evidence.files`, and `evidence.chunks` from the same database. Backing up only `sessions`, or only the GridFS metadata collection, loses file content. For a manual backup on a Free cluster, stop application writes while taking a database-scoped `mongodump`, protect the backup as sensitive data, and rehearse a `mongorestore` into an isolated database. Do not restore over the live database without a separately reviewed recovery procedure.
+A backup must include users, authentication and workspace sessions, properties, GridFS metadata/content, and the settlement journal from the same database. Preserve the operation-lock snapshot for recovery review; never clear restored locks without inspecting pending transactions. Backing up only `sessions`, or only the GridFS metadata collection, loses identity relationships or file content. For a manual backup, stop application writes while taking a database-scoped `mongodump`, protect the backup as sensitive data, and rehearse restoration into an isolated database.
 
 GridFS does not participate in multi-document transactions. The application uploads immutable file versions before updating a session reference. A definite revision conflict triggers best-effort cleanup of only the newly uploaded files from that attempt. When a database acknowledgement is ambiguous, new files are retained because the session write may have committed. Superseded files and files removed by a demo reset are also retained to avoid breaking in-flight readers. See MongoDB's [GridFS consistency guidance](https://www.mongodb.com/docs/manual/core/gridfs/).
 

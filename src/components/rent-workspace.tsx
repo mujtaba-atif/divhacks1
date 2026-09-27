@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { ArrowDownToLine, Building2, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, CircleUserRound, FileImage, FileText, FlaskConical, LayoutDashboard, LoaderCircle, LockKeyhole, Menu, MessageSquare, Plus, PlugZap, RefreshCw, Search, ShieldCheck, Upload, Wallet, X } from "lucide-react";
-import type { BuildingRecord, CaseAction, CaseRecord, DashboardData, EvidenceRecord, EvidenceStage, PolicyResult } from "@/lib/types";
+import { ArrowDownToLine, Building2, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, FileImage, FileText, FlaskConical, LayoutDashboard, LoaderCircle, LockKeyhole, LogOut, Menu, MessageSquare, Plus, PlugZap, RefreshCw, ShieldCheck, Upload, Wallet, X } from "lucide-react";
+import type { AuthUser, CaseAction, CaseRecord, DashboardData, EvidenceRecord, EvidenceStage, PolicyResult } from "@/lib/types";
 import { ActivityTimeline, canRelease, canReviewXrplSettlement, EscrowPanel, EvidencePanel, evidenceSource, findOutboundMessage, formatTestXrp, MessagesPanel, OverviewPanel, type WorkspaceTab } from "./case-panels";
+import { BuildingHistoryDialog, useCaseBuildingContext } from "./building-history";
 import { FinancesPanel } from "./finances-panel";
 import { NewCaseDialog, type NewCaseInput } from "./new-case-dialog";
 import { Button, EmptyState, fullDate, Modal, money, StatusBadge } from "./workspace-ui";
+import { announceSessionChange, redirectIfSignedOut, useSessionGuard } from "./use-session-guard";
 
 type ModalName = "new-case" | "upload" | "expense" | "building" | "integrations" | "reset" | "release" | "xrpl-settle" | "activity" | null;
 type Toast = { message: string; tone: "success" | "info" } | null;
@@ -18,6 +20,7 @@ class RequestError extends Error {
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...options, cache: "no-store" });
+  redirectIfSignedOut(response);
   let result: unknown;
   try { result = await response.json(); } catch { throw new Error("The server returned an unexpected response. Please try again."); }
   if (!response.ok) {
@@ -58,7 +61,8 @@ function actionMessage(action: CaseAction, record: CaseRecord, policy?: PolicyRe
   }
 }
 
-export default function RentWorkspace() {
+export default function RentWorkspace({ user }: { user: AuthUser }) {
+  useSessionGuard(user);
   const [data, setData] = useState<DashboardData | null>(null);
   const [activeId, setActiveId] = useState("");
   const [tab, setTab] = useState<WorkspaceTab>("overview");
@@ -74,6 +78,7 @@ export default function RentWorkspace() {
   const mutationBusy = useRef(false);
   const mutationVersion = useRef(0);
   const record = data?.cases.find((item) => item.id === activeId) || data?.cases[0];
+  const buildingContext = useCaseBuildingContext(record?.id, "tenant", record?.building);
   const xrplIntegration = data?.integrations.find((item) => item.id === "xrpl");
   const geminiIntegration = data?.integrations.find((item) => item.id === "gemini");
 
@@ -89,7 +94,7 @@ export default function RentWorkspace() {
 
   useEffect(() => { void loadDashboard(); }, [loadDashboard]);
   useEffect(() => {
-    if (tab !== "messages" || pending) return;
+    if (pending) return;
     let cancelled = false;
     let refreshing = false;
     async function refreshDashboard() {
@@ -103,7 +108,7 @@ export default function RentWorkspace() {
       } catch { /* Keep the current conversation and draft available during a refresh outage. */ }
       finally { refreshing = false; }
     }
-    const interval = window.setInterval(() => { void refreshDashboard(); }, 5_000);
+    const interval = window.setInterval(() => { void refreshDashboard(); }, tab === "messages" ? 5_000 : 15_000);
     const onVisibilityChange = () => { void refreshDashboard(); };
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => { cancelled = true; window.clearInterval(interval); document.removeEventListener("visibilitychange", onVisibilityChange); };
@@ -177,6 +182,20 @@ export default function RentWorkspace() {
     finally { mutationBusy.current = false; setPending(null); }
   }
 
+  async function logout() {
+    if (mutationBusy.current) return;
+    mutationBusy.current = true; setPending("logout"); setError(null);
+    try {
+      const response = await fetch("/api/auth/logout", { method: "POST" });
+      if (!response.ok) throw new Error("Sign out could not be completed.");
+      announceSessionChange();
+      window.location.assign("/login");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Sign out could not be completed.");
+      mutationBusy.current = false; setPending(null);
+    }
+  }
+
   function navigate(next: WorkspaceTab) { setTab(next); setMobileNav(false); }
   function openModal(next: ModalName) { setError(null); setModal(next); setMobileNav(false); }
   function closeModal() { if (!mutationBusy.current) { setModal(null); setError(null); } }
@@ -193,19 +212,19 @@ export default function RentWorkspace() {
       <div className="nav-label">YOUR HOME</div>
       <button className="home-context" onClick={() => openModal("building")} disabled={!record}><Building2 size={18} /><div><strong>{record?.building.address || "Your building"}</strong><span>{record ? `${record.building.borough} · Apt ${record.apartment}` : "NYC housing records"}</span></div><ChevronRight size={15} /></button>
       <Button className="new-case-button" icon={Plus} onClick={() => openModal("new-case")} disabled={!data}>New case</Button>
-      <div className="sidebar-bottom"><button className="sidebar-utility" onClick={() => openModal("integrations")} disabled={!data}><PlugZap size={17} /><span>Connections</span><span className="green-dot" /></button><button className="sidebar-utility" onClick={() => openModal("reset")} disabled={!data || !!pending}><RefreshCw size={16} /><span>Reset demo</span></button><div className="demo-mode-note"><FlaskConical size={16} /><div><strong>Demo workspace</strong><p>Simulated USD with optional Test XRP settlement.</p></div></div><div className="tenant-profile"><span className="tenant-avatar">{record?.tenant?.name.charAt(0) || "T"}</span><div><strong>{record?.tenant?.name || "Tenant account"}</strong><span>{record?.tenant?.phone || "New York City"}</span></div><CircleUserRound size={18} /></div></div>
+      <div className="sidebar-bottom"><button className="sidebar-utility" onClick={() => openModal("integrations")} disabled={!data}><PlugZap size={17} /><span>Connections</span><span className="green-dot" /></button><button className="sidebar-utility" onClick={() => openModal("reset")} disabled={!data || !!pending}><RefreshCw size={16} /><span>Reset demo</span></button><div className="demo-mode-note"><FlaskConical size={16} /><div><strong>Demo workspace</strong><p>Simulated USD with optional Test XRP settlement.</p></div></div><div className="tenant-profile"><span className="tenant-avatar">{user.displayName.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</span><div><strong>{user.displayName}</strong><span>Tenant · {user.email}</span></div><button className="icon-button" aria-label="Sign out" title="Sign out" onClick={() => void logout()} disabled={pending === "logout"}>{pending === "logout" ? <LoaderCircle className="spin" size={17} /> : <LogOut size={17} />}</button></div></div>
     </aside>
 
-    <div className="workspace-body"><header className="topbar"><div className="topbar-left"><button className="icon-button mobile-menu" aria-label="Open workspace navigation" aria-expanded={mobileNav} onClick={() => setMobileNav(true)}><Menu size={21} /></button><a className="mobile-brand" href="/">RentEscrow <span>NYC</span></a><span>Workspace</span><ChevronRight size={14} /><span>My cases</span>{record && <><ChevronRight size={14} /><strong>{record.id}</strong></>}</div><div className="topbar-right"><span className="demo-pill"><span />Demo mode</span><button className="icon-button" title="View connections" aria-label="View integration connections" onClick={() => openModal("integrations")} disabled={!data}><PlugZap size={18} /></button><span className="topbar-avatar">T</span></div></header>
+    <div className="workspace-body"><header className="topbar"><div className="topbar-left"><button className="icon-button mobile-menu" aria-label="Open workspace navigation" aria-expanded={mobileNav} onClick={() => setMobileNav(true)}><Menu size={21} /></button><a className="mobile-brand" href="/">RentEscrow <span>NYC</span></a><span>Workspace</span><ChevronRight size={14} /><span>My cases</span>{record && <><ChevronRight size={14} /><strong>{record.id}</strong></>}</div><div className="topbar-right"><span className="demo-pill"><span />Demo mode</span><button className="icon-button" title="View connections" aria-label="View integration connections" onClick={() => openModal("integrations")} disabled={!data}><PlugZap size={18} /></button><span className="header-identity"><span>{user.displayName}</span><small>{user.email}</small></span><span className="topbar-avatar">{user.displayName.charAt(0).toUpperCase()}</span><button className="button button-secondary header-logout" onClick={() => void logout()} disabled={pending === "logout"}>{pending === "logout" ? <LoaderCircle className="spin" size={15} /> : <LogOut size={15} />}<span>Sign out</span></button></div></header>
       <main id="main-content" className="main-content">
-        {loading ? <div className="workspace-loading" role="status"><LoaderCircle className="spin" size={27} /><h1>Opening your workspace</h1><p>Loading your repair cases and records.</p></div> : !data ? <div className="workspace-loading"><EmptyState icon={CircleHelp} title="Your workspace could not load" action={<Button icon={RefreshCw} onClick={() => { setLoading(true); void loadDashboard(); }}>Try again</Button>}>{error || "Please try again in a moment."}</EmptyState></div> : !record ? <EmptyState icon={FileText} title="No repair cases yet" action={<Button variant="primary" icon={Plus} onClick={() => openModal("new-case")}>Open a case</Button>}>Your cases will appear here.</EmptyState> : <>
+        {loading ? <div className="workspace-loading" role="status"><LoaderCircle className="spin" size={27} /><h1>Opening your workspace</h1><p>Loading your repair cases and records.</p></div> : !data ? <div className="workspace-loading"><EmptyState icon={CircleHelp} title="Your workspace could not load" action={<Button icon={RefreshCw} onClick={() => { setLoading(true); void loadDashboard(); }}>Try again</Button>}>{error || "Please try again in a moment."}</EmptyState></div> : !record ? <EmptyState icon={FileText} title="No repair cases yet" action={<Button variant="primary" icon={Plus} onClick={() => openModal("new-case")}>Open a case</Button>}>This account has no active cases. Start a new repair case when you are ready.</EmptyState> : <>
           <div className="case-meta-line"><div><span className="eyebrow">REPAIR CASE</span><span className="case-id">{record.id}</span><StatusBadge status={record.status} /></div><label className="case-switcher"><span className="sr-only">Select case</span><select aria-label="Select case" value={record.id} onChange={(event) => { setActiveId(event.target.value); setPolicy(null); setFinancialPolicy(null); setTab("overview"); setError(null); }} disabled={!!pending}>{data.cases.map((item) => <option value={item.id} key={item.id}>{item.id} · {item.title}</option>)}</select><ChevronDown size={14} /></label></div>
           <div className="case-header"><div><h1>{record.title}</h1><div className="case-location"><span><Building2 size={15} />{record.building.address}, Apt {record.apartment}</span><span className="location-divider" /><span>Opened {fullDate(record.createdAt)}</span></div></div><div className="case-header-actions"><a className="button button-secondary icon-only-mobile" href={`/api/cases/${encodeURIComponent(record.id)}/export`} download aria-label="Export case dossier" title="Export case dossier"><ArrowDownToLine size={16} /><span>Export case</span></a><Button variant="primary" icon={Plus} onClick={() => openModal("upload")} disabled={!!pending || record.status === "resolved"}>Add evidence</Button></div></div>
           <div className="case-tabs" role="tablist" aria-label="Case sections">{tabs.map(({ id, label, icon: Icon }) => <button role="tab" id={`tab-${id}`} aria-selected={tab === id} aria-controls={`panel-${id}`} tabIndex={tab === id ? 0 : -1} key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)} onKeyDown={(event) => { const index = tabs.findIndex((item) => item.id === id); let next: number | null = null; if (event.key === "ArrowRight") next = (index + 1) % tabs.length; if (event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length; if (event.key === "Home") next = 0; if (event.key === "End") next = tabs.length - 1; if (next !== null) { event.preventDefault(); setTab(tabs[next].id); document.getElementById(`tab-${tabs[next].id}`)?.focus(); } }}><Icon size={16} />{label}{id === "evidence" && <span>{record.evidence.length}</span>}</button>)}</div>
           {error && !modal && <div className="error-banner" role="alert"><CircleHelp size={18} /><span>{error}</span><button className="icon-button" onClick={() => setError(null)} title="Dismiss error" aria-label="Dismiss error"><X size={16} /></button></div>}
           {record.status === "resolved" && <div className="resolved-banner"><CheckCircle2 size={19} /><div><strong>Repair resolved. Case complete.</strong><span>Your evidence, messages, and settlement receipts remain available for export.</span></div></div>}
           <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} tabIndex={0} className="tab-panel">
-            {tab === "overview" && <OverviewPanel record={record} pending={pending} onAction={runAction} onTab={setTab} onUpload={() => openModal("upload")} onPreview={setPreview} onActivity={() => openModal("activity")} onBuilding={() => openModal("building")} />}
+            {tab === "overview" && <OverviewPanel record={record} pending={pending} onAction={runAction} onTab={setTab} onUpload={() => openModal("upload")} onPreview={setPreview} onActivity={() => openModal("activity")} onBuilding={() => openModal("building")} buildingContext={buildingContext} />}
             {tab === "evidence" && <EvidencePanel record={record} pending={pending} onAction={runAction} onUpload={() => openModal("upload")} onPreview={setPreview} geminiIntegration={geminiIntegration} />}
             {tab === "messages" && <MessagesPanel record={record} pending={pending} onAction={runAction} integration={data.integrations.find((item) => item.id === "photon")} />}
             {tab === "finances" && <FinancesPanel record={record} pending={pending} onAction={runAction} onExpense={() => openModal("expense")} policy={financialPolicy} nessieConfigured={data.integrations.some((item) => item.id === "nessie" && item.status === "configured")} />}
@@ -220,7 +239,7 @@ export default function RentWorkspace() {
     {modal === "new-case" && <NewCaseDialog onClose={closeModal} onCreate={createCase} busy={pending === "create_case"} />}
     {modal === "upload" && record && <UploadDialog record={record} onClose={closeModal} onUpload={uploadEvidence} pending={pending === "upload_evidence"} error={error} geminiConfigured={geminiIntegration?.status === "configured"} />}
     {modal === "expense" && record && <ExpenseDialog onClose={closeModal} onAction={runAction} pending={pending === "add_expense"} error={error} />}
-    {modal === "building" && record && <BuildingDialog building={record.building} onClose={closeModal} />}
+    {modal === "building" && record && <BuildingHistoryDialog context={buildingContext} issue={record.issue} address={record.building.address} borough={record.building.borough} onClose={closeModal} searchable />}
     {modal === "activity" && record && <Modal title="Case activity" subtitle={`Complete history for ${record.id}`} onClose={closeModal}><ActivityTimeline record={record} /></Modal>}
     {modal === "integrations" && data && <Modal title="Workspace connections" subtitle="Integration status for this environment." onClose={closeModal}><div className="integration-list">{data.integrations.map((integration) => <div className="integration-row" key={integration.id}><span className="integration-icon"><PlugZap size={19} /></span><div><strong>{integration.name}</strong><p>{integration.detail}</p></div><span className={`subtle-badge ${integration.status === "configured" || integration.status === "public" ? "badge-green" : ""}`}>{integration.status === "demo" ? "Demo" : integration.status === "configured" ? "Configured" : integration.status === "public" ? "Public data" : "Unavailable"}</span></div>)}</div><div className="inline-note note-amber"><FlaskConical size={18} /><p>The rent balance is simulated USD. When configured and explicitly enabled for a case, settlement uses a real Payment on XRPL Testnet with valueless Test XRP.</p></div></Modal>}
     {modal === "reset" && <Modal title="Reset the demo workspace?" subtitle="This removes cases, uploads, messages, expenses, registered profiles, and contracts in this browser session and restores the sample case." onClose={closeModal}><div className="inline-note note-amber"><FileText size={19} /><p>Export any case records you want to keep before resetting.</p></div>{error && <p className="form-error" role="alert">{error}</p>}<div className="modal-footer"><Button onClick={closeModal} disabled={!!pending}>Keep workspace</Button><Button variant="danger" icon={RefreshCw} busy={pending === "reset"} onClick={() => { void resetDemo(); }}>Reset demo</Button></div></Modal>}
@@ -261,19 +280,4 @@ function ExpenseDialog({ onClose, onAction, pending, error }: { onClose: () => v
     if (result) onClose();
   }
   return <Modal title="Record an expense" subtitle="Add a cost associated with this repair issue." onClose={onClose}><form onSubmit={submit}><div className="form-grid"><label className="field field-wide">Description<input name="label" placeholder="e.g. Portable space heater" required maxLength={200} /></label><label className="field">Amount (USD)<input name="amount" type="number" min="0.01" max="100000" step="0.01" required placeholder="0.00" /></label><label className="field">Category<select name="category"><option value="supplies">Supplies</option><option value="utilities">Utilities</option><option value="accommodation">Accommodation</option><option value="transportation">Transportation</option><option value="other">Other</option></select></label></div>{error && <p className="form-error" role="alert">{error}</p>}<div className="modal-footer"><Button onClick={onClose} disabled={pending}>Cancel</Button><Button type="submit" icon={Plus} variant="primary" busy={pending}>Add expense</Button></div></form></Modal>;
-}
-
-function BuildingDialog({ building, onClose }: { building: BuildingRecord; onClose: () => void }) {
-  const [result, setResult] = useState(building);
-  const [address, setAddress] = useState(building.address);
-  const [borough, setBorough] = useState(building.borough);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  async function search(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setBusy(true); setError("");
-    try { setResult(await request<BuildingRecord>(`/api/buildings?${new URLSearchParams({ address: address.trim(), borough })}`)); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "The building lookup failed."); }
-    finally { setBusy(false); }
-  }
-  return <Modal title="Building records" subtitle="Public housing complaint and violation records." onClose={onClose} wide><form onSubmit={search} className="building-search"><label className="field">Street address<input value={address} onChange={(event) => setAddress(event.target.value)} required maxLength={200} /></label><label className="field">Borough<select value={borough} onChange={(event) => setBorough(event.target.value)}>{["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"].map((name) => <option key={name}>{name}</option>)}</select></label><Button icon={Search} type="submit" busy={busy}>Search</Button></form>{error && <p className="form-error" role="alert">{error}</p>}<div className="records-heading"><div><h3>{result.address}</h3><p>{result.borough}, NY {result.zip}</p></div><span className="subtle-badge">{result.source === "demo" ? "Sample records" : "NYC Open Data"}</span></div>{result.warning && <div className="inline-note note-amber"><CircleHelp size={17} /><p>{result.warning}</p></div>}{[{ name: "Complaints", items: result.complaints }, { name: "Violations", items: result.violations }].map(({ name, items }) => <section className="records-section" key={name}><h3>{name}<span className="count">{items.length}</span></h3>{items.length ? <div className="housing-records">{items.map((item) => <article key={item.id}><span className="record-icon"><Building2 size={16} /></span><div><strong>{item.category}</strong><p>{item.description}</p><span>{fullDate(item.date)} · {item.id}</span></div><span className="subtle-badge">{item.status}</span></article>)}</div> : <p className="muted">No {name.toLowerCase()} returned for this address.</p>}</section>)}<p className="panel-footnote">Retrieved {fullDate(result.fetchedAt)}. Returned records are not a complete building inspection.</p></Modal>;
 }

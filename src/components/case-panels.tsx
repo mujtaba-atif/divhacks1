@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowDownLeft, ArrowRight, ArrowUpRight, BadgeCheck, Building2, CalendarDays, Check, CheckCheck, CheckCircle2, ChevronRight, CircleDollarSign, ExternalLink, FileImage, FileText, FlaskConical, ImagePlus, LockKeyhole, Mail, MessageSquare, Paperclip, Plus, RefreshCw, ScanLine, Send, ShieldCheck, ShieldX, Sparkles, Thermometer, Upload, Wallet, Wrench } from "lucide-react";
+import { ArrowDownLeft, ArrowRight, ArrowUpRight, BadgeCheck, CalendarDays, Check, CheckCheck, CheckCircle2, ChevronRight, CircleDollarSign, ExternalLink, FileImage, FileText, FlaskConical, ImagePlus, LockKeyhole, Mail, MessageSquare, Paperclip, Plus, RefreshCw, ScanLine, Send, ShieldCheck, ShieldX, Sparkles, Thermometer, Upload, Wallet, Wrench } from "lucide-react";
 import type { CaseAction, CaseMessage, CaseRecord, EvidenceRecord, EvidenceStage, IntegrationStatus, PolicyResult } from "@/lib/types";
+import { BuildingHistorySummary, type BuildingContextState } from "./building-history";
 import { normalizeMessagingContact } from "@/lib/messaging-contact";
 import { Button, CheckRow, EmptyState, fullDate, money, SectionHeading, shortDate, time } from "./workspace-ui";
 
@@ -91,7 +92,7 @@ export function ActivityTimeline({ record, limit }: { record: CaseRecord; limit?
   return <ol className="activity-timeline">{events.map((event) => { const Icon = timelineIcon(event.kind); return <li key={event.id}><span className={`timeline-icon timeline-${event.kind}`}><Icon size={15} /></span><div className="timeline-copy"><div><strong>{event.title}</strong><time dateTime={event.createdAt}>{shortDate(event.createdAt)}</time></div><p>{event.detail}</p><span className="timeline-time">{time(event.createdAt)}</span></div></li>; })}</ol>;
 }
 
-export function OverviewPanel({ record, pending, onAction, onTab, onUpload, onPreview, onActivity, onBuilding }: CommonProps & { onTab: (tab: WorkspaceTab) => void; onUpload: () => void; onPreview: (item: EvidenceRecord) => void; onActivity: () => void; onBuilding: () => void }) {
+export function OverviewPanel({ record, pending, onAction, onTab, onUpload, onPreview, onActivity, onBuilding, buildingContext }: CommonProps & { onTab: (tab: WorkspaceTab) => void; onUpload: () => void; onPreview: (item: EvidenceRecord) => void; onActivity: () => void; onBuilding: () => void; buildingContext: BuildingContextState }) {
   const before = record.evidence.find((item) => item.stage === "before");
   const analyzedEvidence = [...record.evidence].reverse().find((item) => item.analysis && (!record.verification || item.stage === "after"));
   const featuredEvidence = analyzedEvidence || before || record.evidence[0];
@@ -136,7 +137,7 @@ export function OverviewPanel({ record, pending, onAction, onTab, onUpload, onPr
 
       <section className="checklist-section"><SectionHeading title="Before funds are released"><ShieldCheck size={18} className="green" /></SectionHeading><ul className="checklist"><CheckRow done={funded} title="Rent placed in escrow" detail={funded ? `${money(record.escrow.amountCents)} in simulated escrow` : "Disputed rent only"} current={!funded} /><CheckRow done={record.repairReported} title="Repair reported complete" detail="By the property manager" current={funded && !record.repairReported} /><CheckRow done={!!record.verification?.verified} title="After-repair evidence verified" detail="Compared with the original record" current={record.repairReported && !record.verification?.verified} /><CheckRow done={record.tenantConfirmed} title="You confirm the resolution" detail="You always have the final say" current={!!record.verification?.verified && !record.tenantConfirmed} /></ul></section>
 
-      <section className="building-summary"><div className="building-summary-icon"><Building2 size={20} /></div><div><h3>Your building</h3><p>{record.building.address}</p><span>{record.building.borough}, NY {record.building.zip}</span></div><button className="icon-button" onClick={onBuilding} aria-label="View building records" title="View building records"><ArrowUpRight size={18} /></button><div className="building-summary-bottom">{record.building.warning ? <span className="building-warning">{record.building.warning}</span> : <><span><strong>{record.building.complaints.length}</strong> complaints</span><span><strong>{record.building.violations.length}</strong> violations</span></>}<span className="source-label">{record.building.source === "demo" ? "Sample records" : "NYC Open Data"}</span></div></section>
+      <BuildingHistorySummary building={buildingContext.building} issue={record.issue} address={record.building.address} borough={record.building.borough} loading={buildingContext.loading} error={buildingContext.error} onOpen={onBuilding} />
       {totalExpenses > 0 && <button className="expense-note" onClick={() => onTab("finances")}><CircleDollarSign size={18} /><span><strong>{money(totalExpenses)}</strong> in recorded expenses</span><ChevronRight size={16} /></button>}
     </aside>
   </div>;
@@ -237,7 +238,7 @@ export function MessagesPanel({ record, pending, onAction, integration }: Common
           {message.providerMessageId && <p className="small muted break-word">Provider reference: <span className="mono">{message.providerMessageId}</span></p>}
           {message.recipient && <p className="small muted break-word">Recipient: {message.recipient}</p>}
         </article>)}</div>
-        {!resolved && <div className="demo-replies"><span className="eyebrow"><FlaskConical size={13} />SAMPLE LANDLORD REPLIES</span><div><Button icon={CalendarDays} onClick={() => { void onAction({ action: "simulate_landlord_reply", variant: "scheduled" }); }} disabled={!!pending || record.repairReported}>Schedule repair</Button><Button icon={Wrench} onClick={() => { void onAction({ action: "simulate_landlord_reply", variant: "completed" }); }} disabled={!!pending || record.repairReported}>Report repair complete</Button></div></div>}
+        {!resolved && !record.tenantUserId && <div className="demo-replies"><span className="eyebrow"><FlaskConical size={13} />SAMPLE LANDLORD REPLIES</span><div><Button icon={CalendarDays} onClick={() => { void onAction({ action: "simulate_landlord_reply", variant: "scheduled" }); }} disabled={!!pending || record.repairReported}>Schedule repair</Button><Button icon={Wrench} onClick={() => { void onAction({ action: "simulate_landlord_reply", variant: "completed" }); }} disabled={!!pending || record.repairReported}>Report repair complete</Button></div></div>}
       </div>
       <section className="message-composer">
         <div className="composer-heading"><span className="small-heading"><FileText size={17} />Message draft</span><Button variant="ghost" icon={Sparkles} onClick={() => updateDraft(draftNotice(record))} disabled={resolved || !!pending}>Draft notice</Button></div>

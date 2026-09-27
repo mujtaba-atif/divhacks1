@@ -1,11 +1,110 @@
 import "server-only";
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { cookies } from "next/headers";
+import type { NextRequest } from "next/server";
 import { z } from "zod";
+import type { AuthUser } from "@/lib/types";
+import { getMongoAuthStorage, type AuthStorage, type AuthUserRecord } from "./auth-store";
 import { ApiError } from "./errors";
+import { verifyPassword } from "./password";
 import { mutateSession, type SessionDocument } from "./store";
 
 export type UserRole = "tenant" | "landlord";
+
+export const AUTH_COOKIE_NAME = "rentescrow_session";
+export const AUTH_SESSION_SECONDS = 60 * 60 * 24 * 30;
+const AUTH_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
+const INVALID_CREDENTIALS = "Invalid email or password.";
+
+export const loginSchema = z.object({
+  email: z.string().trim().email().max(320).transform((value) => value.toLowerCase()),
+  password: z.string().min(1).max(256),
+}).strict();
+
+function sessionTokenHash(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function workspaceOwnerId(userId: string): string {
+  return createHash("sha256").update(userId).digest("hex");
+}
+
+export function authUserFromRecord(record: AuthUserRecord): AuthUser {
+  if ((record.role !== "tenant" && record.role !== "landlord")
+    || typeof record.email !== "string" || typeof record.displayName !== "string") {
+    throw new ApiError(503, "The authenticated user record is invalid.");
+  }
+  const id = record._id.toHexString();
+  return {
+    id,
+    email: record.email,
+    role: record.role,
+    displayName: record.displayName,
+    workspaceOwnerId: workspaceOwnerId(id),
+  };
+}
+
+async function resolveStorage(storage?: AuthStorage): Promise<AuthStorage> {
+  return storage ?? getMongoAuthStorage();
+}
+
+export async function loginWithPassword(
+  input: z.infer<typeof loginSchema>,
+  storage?: AuthStorage,
+): Promise<{ user: AuthUser; token: string; expiresAt: Date }> {
+  const activeStorage = await resolveStorage(storage);
+  const record = await activeStorage.findUserByEmail(input.email.toLowerCase());
+  const validPassword = await verifyPassword(input.password, record?.passwordHash);
+  if (!record || !validPassword) throw new ApiError(401, INVALID_CREDENTIALS);
+
+  const token = randomBytes(32).toString("hex");
+  const createdAt = new Date();
+  const expiresAt = new Date(createdAt.getTime() + AUTH_SESSION_SECONDS * 1000);
+  await activeStorage.createSession({
+    sessionTokenHash: sessionTokenHash(token),
+    userId: record._id,
+    createdAt,
+    expiresAt,
+  });
+  return { user: authUserFromRecord(record), token, expiresAt };
+}
+
+export async function getCurrentUser(token?: string, storage?: AuthStorage): Promise<AuthUser | null> {
+  const resolvedToken = token ?? (await cookies()).get(AUTH_COOKIE_NAME)?.value;
+  if (!resolvedToken || !AUTH_TOKEN_PATTERN.test(resolvedToken)) return null;
+  const activeStorage = await resolveStorage(storage);
+  const record = await activeStorage.findUserBySessionTokenHash(sessionTokenHash(resolvedToken), new Date());
+  return record ? authUserFromRecord(record) : null;
+}
+
+export async function requireUser(request: NextRequest, storage?: AuthStorage): Promise<AuthUser> {
+  const user = await getCurrentUser(request.cookies.get(AUTH_COOKIE_NAME)?.value ?? "", storage);
+  if (!user) throw new ApiError(401, "Sign in to continue.", false, "AUTH_REQUIRED");
+  return user;
+}
+
+export async function requireTenant(request: NextRequest, storage?: AuthStorage): Promise<AuthUser> {
+  const user = await requireUser(request, storage);
+  if (user.role !== "tenant") {
+    throw new ApiError(403, "This action is available only to tenants.", false, "ROLE_NOT_ALLOWED");
+  }
+  return user;
+}
+
+export async function requireLandlord(request: NextRequest, storage?: AuthStorage): Promise<AuthUser> {
+  const user = await requireUser(request, storage);
+  if (user.role !== "landlord") {
+    throw new ApiError(403, "This action is available only to landlords.", false, "ROLE_NOT_ALLOWED");
+  }
+  return user;
+}
+
+export async function revokeSessionToken(token?: string, storage?: AuthStorage): Promise<void> {
+  if (!token || !AUTH_TOKEN_PATTERN.test(token)) return;
+  const activeStorage = await resolveStorage(storage);
+  await activeStorage.revokeSession(sessionTokenHash(token));
+}
 
 export interface RegisteredUser {
   id: string;

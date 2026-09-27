@@ -28,14 +28,20 @@ function indexedDatabase() {
   return { database, calls };
 }
 
-test("MongoDB initializes unique session owners and GridFS ownership/chunk indexes", async () => {
+test("MongoDB initializes session, public building cache, and GridFS indexes", async () => {
   const { database, calls } = indexedDatabase();
   await ensureMongoIndexes(database);
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 6);
   assert.deepEqual(calls.find((call) => call.collection === "sessions"), {
     collection: "sessions", keys: { ownerId: 1 }, options: { unique: true, name: "sessions_ownerId_unique" },
   });
   assert.equal(calls.find((call) => call.collection === "evidence.chunks")?.options.unique, true);
+  assert.deepEqual(calls.find((call) => call.options.name === "nyc_building_address_unique"), {
+    collection: "nyc_buildings", keys: { key: 1 }, options: { unique: true, name: "nyc_building_address_unique" },
+  });
+  assert.deepEqual(calls.find((call) => call.options.name === "nyc_building_retention"), {
+    collection: "nyc_buildings", keys: { purgeAt: 1 }, options: { expireAfterSeconds: 0, name: "nyc_building_retention" },
+  });
   assert.deepEqual(calls.find((call) => call.options.name === "evidence_owner_case_item_hash")?.keys,
     { "metadata.ownerId": 1, "metadata.caseId": 1, "metadata.evidenceId": 1, "metadata.sha256": 1 });
 });
@@ -59,7 +65,7 @@ test("MongoDB connection caching coalesces callers with bounded pools and suppor
     assert.equal(first, database);
     assert.equal(second, database);
     assert.equal(connect.mock.callCount(), 1);
-    assert.equal(calls.length, 4);
+    assert.equal(calls.length, 6);
   } finally {
     await closeMongoConnection();
   }

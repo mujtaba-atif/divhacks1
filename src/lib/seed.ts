@@ -1,4 +1,5 @@
 import type { BuildingRecord, CaseRecord, IssueType } from "./types";
+import { getBuildingSummary } from "./building-context";
 import { demoFinancialProfile, demoRentHistory } from "./financial-fixture";
 
 export const DEMO_PARTICIPANTS = {
@@ -13,31 +14,46 @@ const at = (daysAgo = 0, hour = 10) => {
   return date.toISOString();
 };
 
-export function demoBuilding(): BuildingRecord {
-  return {
+export function demoBuilding(now = new Date()): BuildingRecord {
+  const demoAt = (daysAgo = 0, hour = 10) => {
+    const date = new Date(now);
+    date.setDate(date.getDate() - daysAgo);
+    date.setHours(hour, 0, 0, 0);
+    return date.toISOString();
+  };
+  const record: BuildingRecord = {
     address: "123 Example Street",
     borough: "Brooklyn",
     zip: "11201",
     source: "demo",
-    fetchedAt: new Date().toISOString(),
-    warning: "Fictional building and sample records for the demonstration.",
+    fetchedAt: now.toISOString(),
+    warning: "DEMO DATA: fictional building and sample records for the demonstration.",
+    buildingId: "address:BROOKLYN|123|EXAMPLE STREET",
+    identifiers: {},
+    normalizedAddress: { houseNumber: "123", streetName: "EXAMPLE STREET", borough: "BROOKLYN", zip: "11201" },
+    lookupStatus: "demo",
+    datasets: { complaints: "ok", violations: "ok" },
     complaints: [
       ...Array.from({ length: 6 }, (_, i) => ({
-        id: `DEMO-HPD-${3001 + i}`, category: "HEAT/HOT WATER",
-        description: "Entire building - insufficient heat", status: i < 4 ? "OPEN" : "CLOSED",
-        date: at(i + 1),
+        id: `DEMO-HPD-${3001 + i}`, complaintId: `DEMO-HPD-${3001 + i}`, category: "HEAT/HOT WATER",
+        description: "Building-wide insufficient heat", status: i < 4 ? "OPEN" : "CLOSED",
+        normalizedStatus: i < 4 ? "open" as const : "closed" as const,
+        date: demoAt(i + 1),
       })),
       ...Array.from({ length: 3 }, (_, i) => ({
-        id: `DEMO-HPD-${4001 + i}`, category: "HOT WATER",
-        description: "Apartment - no hot water", status: i === 0 ? "OPEN" : "CLOSED",
-        date: at(i + 8),
+        id: `DEMO-HPD-${4001 + i}`, complaintId: `DEMO-HPD-${4001 + i}`, category: "HOT WATER",
+        description: "No hot water reported", status: i === 0 ? "OPEN" : "CLOSED",
+        normalizedStatus: i === 0 ? "open" as const : "closed" as const,
+        date: demoAt(i + 8),
       })),
     ],
     violations: [
-      { id: "DEMO-V-101", category: "Class C", description: "Restore adequate heat to the apartment.", status: "OPEN", date: at(2) },
-      { id: "DEMO-V-102", category: "Class C", description: "Restore hot water supply to the building.", status: "OPEN", date: at(5) },
+      { id: "DEMO-V-101", category: "Class C", description: "Restore adequate heat.", status: "OPEN", normalizedStatus: "open", date: demoAt(2) },
+      { id: "DEMO-V-102", category: "Class C", description: "Restore hot water supply to the building.", status: "OPEN", normalizedStatus: "open", date: demoAt(5) },
     ],
   };
+  record.summary = getBuildingSummary(record, now);
+  return record;
 }
 
 export interface NewCaseInput {

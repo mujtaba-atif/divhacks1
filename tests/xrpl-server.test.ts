@@ -275,7 +275,32 @@ test("case ownership is session isolated", async (t) => {
     /Case not found in this demo session/);
 });
 
-test("enabling XRPL with MongoDB storage rejects before reading or mutating the session", async (t) => {
+test("an authenticated workspace without a server-seeded signer binding cannot invoke XRPL actions", async (t) => {
+  environment(t, { RENTESCROW_STORAGE: "local" });
+  const { document } = await createSession();
+  await mutateSession(document.ownerId, (session) => {
+    session.tenantUserId = "tenant-two-object-id";
+    session.tenantDisplayName = "Jordan Lee";
+    session.demoAccount = "tenant2";
+    session.cases[0].tenantUserId = session.tenantUserId;
+  });
+  const actions = [
+    { action: "enable_xrpl" },
+    { action: "settle_xrpl" },
+    { action: "reconcile_xrpl" },
+    { action: "xrpl_security_demo", scenario: "wallet_switch" },
+  ] as const;
+  for (const action of actions) {
+    await assert.rejects(performCaseAction(document.ownerId, document.cases[0].id, action),
+      (error: unknown) => error instanceof ApiError && error.status === 403
+        && error.code === "XRPL_ACCOUNT_NOT_AUTHORIZED");
+  }
+  const stored = await readSession(document.ownerId);
+  assert.equal(stored?.cases[0].xrplSettlement, undefined);
+  assert.equal(stored?.cases[0].escrow.audit.some((entry) => entry.action === "Payment"), false);
+});
+
+test("enabling XRPL with misconfigured MongoDB storage fails closed before mutation", async (t) => {
   environment(t, { RENTESCROW_STORAGE: "local", NESSIE_ENABLED: undefined });
   const { document } = await createSession();
   await performCaseAction(document.ownerId, document.cases[0].id, { action: "create_escrow" });
@@ -283,7 +308,7 @@ test("enabling XRPL with MongoDB storage rejects before reading or mutating the 
   const connect = t.mock.method(MongoClient.prototype, "connect", async () => { throw new Error("Must reject before MongoDB access"); });
   process.env.RENTESCROW_STORAGE = "mongodb";
   await assert.rejects(performCaseAction(document.ownerId, document.cases[0].id, { action: "enable_xrpl" }),
-    (error: unknown) => error instanceof ApiError && error.code === "XRPL_DISTRIBUTED_LOCK_REQUIRED" && !error.persistAudit);
+    (error: unknown) => error instanceof ApiError && /MONGODB_URI is missing/.test(error.message) && !error.persistAudit);
   assert.equal(connect.mock.callCount(), 0);
   process.env.RENTESCROW_STORAGE = "local";
   assert.deepEqual(await readSession(document.ownerId), before);
@@ -296,12 +321,25 @@ test("MongoDB mutations skip local lock files and retain optimistic revision che
   const { document } = await createSession();
   let persisted = structuredClone(document);
   let forceConflict = false;
+  let operationLock: Record<string, unknown> | undefined;
   const revisions: number[] = [];
   await closeMongoConnection();
   t.mock.method(MongoClient.prototype, "connect", async function (this: MongoClient) { return this; });
   t.mock.method(MongoClient.prototype, "close", async () => undefined);
   t.mock.method(Db.prototype, "collection", (name: string) => ({
     createIndex: async () => "test-index",
+    insertOne: async (document: Record<string, unknown>) => {
+      assert.equal(name, "operation_locks");
+      if (operationLock) throw Object.assign(new Error("duplicate"), { code: 11000 });
+      operationLock = { ...document };
+      return { acknowledged: true, insertedId: document._id };
+    },
+    deleteOne: async ({ _id, ownerToken }: { _id: string; ownerToken: string }) => {
+      assert.equal(name, "operation_locks");
+      if (operationLock?._id !== _id || operationLock?.ownerToken !== ownerToken) return { deletedCount: 0 };
+      operationLock = undefined;
+      return { deletedCount: 1 };
+    },
     findOne: async ({ ownerId }: { ownerId?: string }) => name === "sessions" && ownerId === persisted.ownerId ? structuredClone(persisted) : null,
     replaceOne: async ({ ownerId, revision }: { ownerId: string; revision: number }, replacement: typeof document) => {
       assert.equal(name, "sessions");

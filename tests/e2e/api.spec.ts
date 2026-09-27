@@ -1,9 +1,11 @@
-import { test, expect, type APIRequestContext } from "@playwright/test";
+import { test, expect } from "./auth-fixtures";
+import type { APIRequest, APIRequestContext } from "@playwright/test";
 import path from "node:path";
 import { readFile } from "node:fs/promises";
 import type { CaseRecord } from "../../src/lib/types";
 
 import { origin } from "./environment";
+import { signIn } from "./auth-fixtures";
 async function dashboard(request: APIRequestContext) {
   const response = await request.get("/api/dashboard");
   expect(response.ok()).toBeTruthy();
@@ -17,11 +19,25 @@ async function successfulAction(request: APIRequestContext, id: string, data: Re
   expect(response.ok(), await response.text()).toBeTruthy();
   return (await response.json()).case;
 }
-async function verifiedCase(request: APIRequestContext) {
+async function reportRepairAsLandlord(playwright: { request: APIRequest }, id: string) {
+  const landlord = await playwright.request.newContext({ baseURL: origin });
+  try {
+    await signIn(landlord, "landlord");
+    const schedule = await landlord.post(`/api/landlord/cases/${id}/actions`, {
+      headers: { Origin: origin }, data: { action: "schedule", scheduledFor: new Date(Date.now() + 86_400_000).toISOString(), notes: "A licensed technician is scheduled." },
+    });
+    expect(schedule.ok(), await schedule.text()).toBeTruthy();
+    const report = await landlord.post(`/api/landlord/cases/${id}/actions`, {
+      headers: { Origin: origin }, data: { action: "report_complete", notes: "The repair is complete; please verify the result." },
+    });
+    expect(report.ok(), await report.text()).toBeTruthy();
+  } finally { await landlord.dispose(); }
+}
+async function verifiedCase(request: APIRequestContext, playwright: { request: APIRequest }) {
   const initial = (await dashboard(request)).cases[0] as CaseRecord;
   await successfulAction(request, initial.id, { action: "create_escrow" });
   await successfulAction(request, initial.id, { action: "send_message", body: "Please arrange a heating repair for apartment 4B.", approved: true, requestId: crypto.randomUUID() });
-  await successfulAction(request, initial.id, { action: "simulate_landlord_reply", variant: "completed" });
+  await reportRepairAsLandlord(playwright, initial.id);
   const evidence = await successfulAction(request, initial.id, { action: "add_demo_evidence", stage: "after" });
   await successfulAction(request, initial.id, { action: "analyze_evidence", evidenceId: evidence.evidence.at(-1)!.id });
   return successfulAction(request, initial.id, { action: "verify_repair" });
@@ -41,8 +57,8 @@ test("demo creation and reset keep Mujtaba as tenant and Rayyan as the message r
   expect(reset.ownerId).toBe(initial.ownerId);
 });
 
-test("complete case lifecycle, persisted audit, and idempotent settlement", async ({ request }) => {
-  const record = await verifiedCase(request);
+test("complete case lifecycle, persisted audit, and idempotent settlement", async ({ request, playwright }) => {
+  const record = await verifiedCase(request, playwright);
   expect(record.status).toBe("verified");
   expect(record.verification?.temperatureF).toBe(72);
   const premature = await action(request, record.id, { action: "release_escrow" });
@@ -71,8 +87,8 @@ test("concurrent funding and finance sync cannot debit twice or replenish locked
   expect(synced.escrow.audit.filter((entry) => entry.action === "EscrowCreate" && entry.status === "validated")).toHaveLength(1);
 });
 
-test("wallet substitution is rejected and recorded without submission", async ({ request }) => {
-  const record = await verifiedCase(request);
+test("wallet substitution is rejected and recorded without submission", async ({ request, playwright }) => {
+  const record = await verifiedCase(request, playwright);
   await successfulAction(request, record.id, { action: "confirm_resolution" });
   const response = await action(request, record.id, { action: "policy_check", intent: {
     caseId: record.id, escrowId: record.escrow.id, transactionType: "EscrowFinish", destination: "rATTACKER999",
@@ -86,8 +102,8 @@ test("wallet substitution is rejected and recorded without submission", async ({
   expect(result.case.escrow.audit.at(-1).status).toBe("rejected");
 });
 
-test("new uploaded evidence invalidates previous verification and tenant consent", async ({ request }) => {
-  const record = await verifiedCase(request);
+test("new uploaded evidence invalidates previous verification and tenant consent", async ({ request, playwright }) => {
+  const record = await verifiedCase(request, playwright);
   await successfulAction(request, record.id, { action: "confirm_resolution" });
   const upload = await request.post(`/api/cases/${record.id}/evidence`, {
     headers: { Origin: origin }, multipart: { stage: "after", note: "Additional evidence",
@@ -128,8 +144,8 @@ test("new cases are session-scoped and insufficient funds never create an escrow
   expect(stored.escrow.createHash).toBeUndefined();
   const other = await playwright.request.newContext({ baseURL: origin });
   try {
-    await dashboard(other);
-    expect((await other.get(`/api/cases/${record.id}/export`)).status()).toBe(404);
-    expect((await action(other, record.id, { action: "create_escrow" })).status()).toBe(404);
+    await signIn(other, "tenant2");
+    expect((await other.get(`/api/cases/${record.id}/export`)).status()).toBe(403);
+    expect((await action(other, record.id, { action: "create_escrow" })).status()).toBe(403);
   } finally { await other.dispose(); }
 });

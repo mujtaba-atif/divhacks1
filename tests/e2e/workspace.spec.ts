@@ -1,6 +1,23 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, signIn } from "./auth-fixtures";
+import { origin } from "./environment";
+import type { APIRequest } from "@playwright/test";
 
-test("desktop workspace renders assets and completes the tenant repair workflow", async ({ page }) => {
+async function reportRepairAsLandlord(playwright: { request: APIRequest }) {
+  const landlord = await playwright.request.newContext({ baseURL: origin });
+  try {
+    await signIn(landlord, "landlord");
+    const schedule = await landlord.post("/api/landlord/cases/RE-1042/actions", {
+      headers: { Origin: origin }, data: { action: "schedule", scheduledFor: new Date(Date.now() + 86_400_000).toISOString(), notes: "A licensed technician is scheduled." },
+    });
+    expect(schedule.ok(), await schedule.text()).toBeTruthy();
+    const report = await landlord.post("/api/landlord/cases/RE-1042/actions", {
+      headers: { Origin: origin }, data: { action: "report_complete", notes: "The repair is complete; please verify the result." },
+    });
+    expect(report.ok(), await report.text()).toBeTruthy();
+  } finally { await landlord.dispose(); }
+}
+
+test("desktop workspace renders assets and completes the tenant repair workflow", async ({ page, playwright }) => {
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.setViewportSize({ width: 1440, height: 1050 });
@@ -18,11 +35,10 @@ test("desktop workspace renders assets and completes the tenant repair workflow"
   await page.getByRole("button", { name: "Set aside $400", exact: true }).click();
   await expect(page.getByRole("button", { name: "Review & release $400", exact: true })).toBeDisabled();
 
+  await reportRepairAsLandlord(playwright);
+  await page.reload();
   await page.getByRole("tab", { name: "Messages", exact: true }).click();
-  await page.getByRole("button", { name: "Schedule repair", exact: true }).click();
-  await expect(page.getByText(/Demo landlord reply: A technician/)).toBeVisible();
-  await page.getByRole("button", { name: "Report repair complete", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Report repair complete", exact: true })).toBeDisabled();
+  await expect(page.getByText(/repair is complete; please verify/i)).toBeVisible();
 
   await page.getByRole("tab", { name: /^Evidence/ }).click();
   await page.getByRole("button", { name: "Add after photo", exact: true }).click();
