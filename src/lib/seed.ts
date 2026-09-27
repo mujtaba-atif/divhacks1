@@ -92,6 +92,8 @@ export function createDemoCase(ownerId: string): CaseRecord {
   });
   record.id = "RE-1042";
   record.tenant = { ...DEMO_PARTICIPANTS.tenant };
+  record.tenantName = DEMO_PARTICIPANTS.tenant.name;
+  record.tenantPhone = DEMO_PARTICIPANTS.tenant.phone;
   record.financialProfile = demoFinancialProfile(ownerId, record.id);
   record.escrow.id = "ESC-RE-1042";
   record.createdAt = at(3, 9);

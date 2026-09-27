@@ -93,7 +93,7 @@ export async function runSpectrumReplies(options: ReplyOptions = {}): Promise<nu
       if (!incoming || normalizeMessagingContact(incoming.sender) !== config.allowedRecipient
         || (config.sendingLine && incoming.sendingLine !== config.sendingLine)) continue;
       try {
-        await (options.receive ?? receiveLandlordMessage)(config.tenantId, config.caseId, incoming);
+        await (options.receive ?? receiveLandlordMessage)(config.tenantId, undefined, incoming);
         logger.log("Case reply persisted or already recorded.");
       } catch (error) {
         if (error instanceof ApiError && error.code === "MESSAGE_BINDING_REJECTED") {

@@ -66,6 +66,15 @@ export function getPhotonConfig(): PhotonConfig | undefined {
   return { provider: "spectrum", projectId, projectSecret, allowedRecipient, tenantId, caseId, ...(sendingLine ? { sendingLine } : {}) };
 }
 
+export function isPhotonCaseBound(record: CaseRecord, config: PhotonConfig): boolean {
+  const recipient = normalizeMessagingContact(record.landlordContact);
+  const binding = record.demoMessagingBinding;
+  const approvedCase = record.id === config.caseId || (record.case_type === undefined
+    && binding?.ownerId === record.ownerId && binding.caseId === record.id
+    && binding.recipient === recipient);
+  return record.ownerId === config.tenantId && approvedCase && recipient === config.allowedRecipient;
+}
+
 function prepareWithConfig(record: CaseRecord, body: string, config: PhotonConfig | undefined): PreparedLandlordMessage {
   const text = body.trim();
   if (!text || text.length > 10_000 || record.status === "resolved" || !/^[a-zA-Z0-9-]{1,80}$/.test(record.id)) {
@@ -75,8 +84,7 @@ function prepareWithConfig(record: CaseRecord, body: string, config: PhotonConfi
   if (!recipient) {
     throw new IntegrationError("This case has no valid landlord contact. Configure its recipient before sending.", "Photon", "rejected");
   }
-  if (config && (record.ownerId !== config.tenantId || record.id !== config.caseId
-    || recipient !== config.allowedRecipient)) {
+  if (config && !isPhotonCaseBound(record, config)) {
     throw new IntegrationError("This tenant, case, or landlord contact is not the approved Photon messaging binding.", "Photon", "rejected");
   }
   const reference = `\n\nRentEscrow case: ${record.id}`;

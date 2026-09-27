@@ -104,7 +104,7 @@ export async function readLimitedBody(request: NextRequest, limit: number): Prom
   return new Uint8Array(Buffer.concat(chunks, total));
 }
 
-export async function readJson<T>(request: NextRequest, schema: z.ZodType<T>): Promise<T> {
+export async function readJson<T>(request: NextRequest, schema: z.ZodType<T, z.ZodTypeDef, unknown>): Promise<T> {
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
     throw new ApiError(415, "Send this request as application/json.");
   }

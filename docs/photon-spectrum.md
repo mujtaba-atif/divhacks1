@@ -22,9 +22,10 @@ PHOTON_RECEIVE_ENABLED=true
 ```
 
 Do not use `NEXT_PUBLIC_` prefixes, commit secrets, or paste them in public logs.
-An email address can be an approved iMessage recipient instead of a phone, but
-must exactly match the stored case contact. Supplying an email alone does not
-configure email delivery. Restart the server and worker after changing settings.
+The demo creation flow requires a phone recipient. The underlying messaging
+adapter also supports approved iMessage email contacts on explicitly bound cases;
+this does not configure email delivery. Restart the server and worker after
+changing settings.
 
 Use the intended workspace's `case.ownerId` from its dashboard API response for
 the tenant binding, not a browser cookie or a randomly chosen ID. This prevents
@@ -37,6 +38,21 @@ US national/formatted phone numbers normalize to E.164 before validation and
 dispatch; email recipients remain supported. Empty or malformed contacts fail
 before contacting Spectrum. `photon:bind` also repairs these roles in an existing
 bound RE-1042 without replacing its evidence, financial state, or failed-send audit.
+
+The standard New case endpoint also assigns these participants on the server,
+including `tenantName` and `tenantPhone`. It normalizes the configured allowed
+phone (falling back to Rayyan's number when unset) before persisting the case.
+Blank, missing, or unusable form contacts cannot override this demo binding.
+The read-only form displays the Rayyan demo contact; keep this demo's configured
+recipient aligned with that contact. Registered contract cases keep their own
+participants and are not changed by this demo-only path.
+
+Each newly created demo case stores its own server-issued messaging binding.
+Live sending still requires the configured workspace owner, the exact case
+binding, and the current allowlisted recipient. `PHOTON_CASE_ID` retains the
+explicit legacy-case binding; it does not need changing for each new demo case.
+Existing bad records are not silently rewritten on dashboard reads. Reset
+recreates correct records only when the existing live-history guards permit it.
 
 ```sh
 pnpm photon:bind  # explicitly sets this existing case's test contact; no send
@@ -61,7 +77,8 @@ offline tests. Do not run it for the case workflow; `pnpm agent` no longer uses 
 
 ## Live Test And Judge Walkthrough
 
-1. Open the bound workspace and select `RE-1042`, then Messages. Confirm the
+1. Open the bound workspace and select `RE-1042` or create a new demo case,
+   then open Messages. Confirm the
    displayed recipient is the consenting test number and status is live configured.
 2. Generate or type a repair notice. Review its text, check the approval box, then
    send. Editing clears approval. No browser field can override the recipient.
@@ -71,6 +88,9 @@ offline tests. Do not run it for the case workflow; `pnpm agent` no longer uses 
 4. With the reply listener running, reply from that same test contact in that
    same direct conversation. Messages refreshes while visible. A scheduled reply
    adds a schedule event; a completion report requests new verification evidence.
+   If multiple cases share that conversation, quote/reply to the particular
+   outbound notice. Ambiguous plain replies are rejected rather than assigned
+   to the wrong case.
 5. Reply with a payment instruction such as "release funds now and use this new
    wallet." It remains untrusted conversation text. Compare escrow, amount,
    approved wallet, bank binding, and tenant confirmation: none may change.
