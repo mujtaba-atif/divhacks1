@@ -48,23 +48,21 @@ limitations.
 | NYC Open Data | Public building complaint and violation lookup; explicit warnings on unavailable data |
 | Gemini | Server-side structured evidence analysis and before/after comparison when configured |
 | Nessie | Verified sandbox customer/account binding, rent history, tenant-reviewed costs, and account-substitution guardrail |
-| Photon | Opt-in approved-recipient outbound iMessage; demo replies by default |
-| Spectrum | Separate opt-in live iMessage echo worker (`pnpm agent`); not connected to case records |
+| Photon Spectrum | Tenant-approved iMessage, durable send receipts, and an authenticated case reply listener |
 | MongoDB Atlas | Session records and GridFS uploads when configured; local atomic JSON persistence by default |
 | XRPL | Guarded real Testnet Payment settlement; application escrow remains simulated USD |
 
-## Spectrum iMessage worker
+## Photon Spectrum
 
-Set `SPECTRUM_PROJECT_ID` and `SPECTRUM_PROJECT_SECRET` in ignored `.env.local`,
-then run `pnpm agent` in a separate terminal. This is a **live** worker: it
-replies to newly received iMessage text in the originating conversation,
-including group conversations. Only start it on a dedicated test project whose
-participants expect automated replies. Stop it with Ctrl+C.
+The existing Messages tab now uses Spectrum project credentials for live sends.
+Each send requires tenant approval and a server-bound tenant, case, and test
+recipient. Credentials stay in ignored `.env.local`; no HTTP proxy token is used.
+Run `pnpm photon:check` for a read-only authentication check. The separate
+`pnpm agent` command receives authenticated case replies and never auto-replies.
 
-These credentials are distinct from `PHOTON_PROXY_TOKEN`. The worker does not
-update cases, classify landlord replies, or persist messages to Atlas. The app's
-approved-recipient Photon HTTP adapter remains unchanged. See
-[Spectrum limitations](docs/integrations.md#spectrum-worker) before running it.
+See [setup, live test, and judge walkthrough](docs/photon-spectrum.md). Demo mode
+remains available with `PHOTON_LIVE_SEND=false`. Provider acceptance is not a
+delivery/read receipt; uncertain sends are retained and cannot be blindly retried.
 
 ## XRP Testnet demo
 

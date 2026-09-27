@@ -20,7 +20,7 @@ async function successfulAction(request: APIRequestContext, id: string, data: Re
 async function verifiedCase(request: APIRequestContext) {
   const initial = (await dashboard(request)).cases[0] as CaseRecord;
   await successfulAction(request, initial.id, { action: "create_escrow" });
-  await successfulAction(request, initial.id, { action: "send_message", body: "Please arrange a heating repair for apartment 4B." });
+  await successfulAction(request, initial.id, { action: "send_message", body: "Please arrange a heating repair for apartment 4B.", approved: true, requestId: crypto.randomUUID() });
   await successfulAction(request, initial.id, { action: "simulate_landlord_reply", variant: "completed" });
   const evidence = await successfulAction(request, initial.id, { action: "add_demo_evidence", stage: "after" });
   await successfulAction(request, initial.id, { action: "analyze_evidence", evidenceId: evidence.evidence.at(-1)!.id });

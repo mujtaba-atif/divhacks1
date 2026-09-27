@@ -22,6 +22,7 @@ import {
 import { evaluateFinancialBinding, evaluatePolicy, evaluateXrplPolicy, makeIntent, makeXrplIntent } from "@/lib/policy";
 import { demoFinancialProfile } from "@/lib/financial-fixture";
 import { NessieError, resolveFinancialBinding } from "@/lib/integrations/nessie";
+import { getPhotonConfig, prepareLandlordMessage } from "@/lib/integrations/photon";
 import { createNewCase } from "@/lib/seed";
 import type {
   AuditRecord,
@@ -51,7 +52,11 @@ import type { newCaseSchema } from "./validation";
 import { assertXrplWalletAvailable, readXrplJournal, recordXrplPending, recordXrplValidated } from "./xrpl-journal";
 
 export type CaseActionResult = { case: CaseRecord; policy?: PolicyResult };
-const UNCERTAIN_DELIVERY_RETRY_DELAY_MS = 5 * 60 * 1000;
+interface MessagingDependencies {
+  prepare: typeof prepareLandlordMessage;
+  send: typeof sendLandlordMessage;
+}
+const defaultMessaging: MessagingDependencies = { prepare: prepareLandlordMessage, send: sendLandlordMessage };
 
 function now() { return new Date().toISOString(); }
 
@@ -64,7 +69,7 @@ function updateStatus(caseRecord: CaseRecord) {
   caseRecord.status = caseRecord.escrow.status === "released" ? "resolved"
     : caseRecord.verification?.verified ? "verified"
     : caseRecord.repairReported ? "verification"
-    : caseRecord.messages.length > 0 || caseRecord.escrow.status === "locked" ? "awaiting_repair"
+    : caseRecord.messages.some((message) => ["demo", "sent", "received"].includes(message.delivery)) || caseRecord.escrow.status === "locked" ? "awaiting_repair"
     : "open";
 }
 
@@ -87,7 +92,8 @@ function applyLandlordReply(caseRecord: CaseRecord, body: string, delivery: Case
   const reportsNewCompletion = classification.intent === "repair_complete" && !caseRecord.repairReported;
   const messageCount = reportsNewCompletion ? 2 : 1;
   if (caseRecord.messages.length + messageCount > 200) throw new ApiError(409, "This case has reached its demo message limit.");
-  caseRecord.messages.push({ id: randomUUID(), sender: "landlord", body, createdAt: now(), delivery, classification });
+  const message: CaseMessage = { id: randomUUID(), sender: "landlord", body, createdAt: now(), delivery, classification };
+  caseRecord.messages.push(message);
   const title = classification.intent === "scheduled" && classification.scheduledFor
     ? `Maintenance scheduled for ${classification.scheduledFor}`
     : REPLY_EVENT_TITLES[classification.intent];
@@ -101,6 +107,86 @@ function applyLandlordReply(caseRecord: CaseRecord, body: string, delivery: Case
   }
   updateStatus(caseRecord);
   event(caseRecord, title, body, "message");
+  return message;
+}
+
+function messageFailure(caseRecord: CaseRecord, message: CaseMessage, error: unknown, dispatched: boolean): never {
+  const uncertain = dispatched && (!(error instanceof IntegrationError) || error.code === "uncertain_delivery");
+  message.delivery = uncertain ? "uncertain" : "failed";
+  message.failureReason = uncertain
+    ? "Delivery could not be confirmed. Check the provider conversation; this attempt will not be retried automatically."
+    : error instanceof IntegrationError ? error.message : "The messaging provider could not start this send.";
+  event(caseRecord, uncertain ? "Message delivery uncertain" : "Message not sent", message.failureReason, "message");
+  updateStatus(caseRecord);
+  throw new ApiError(error instanceof IntegrationError && error.code === "rejected" ? 409 : 503,
+    message.failureReason, true, uncertain ? "MESSAGE_DELIVERY_UNCERTAIN" : "MESSAGE_SEND_FAILED", undefined, caseRecord);
+}
+
+async function sendApprovedMessage(
+  document: SessionDocument,
+  caseRecord: CaseRecord,
+  action: Extract<CaseAction, { action: "send_message" }>,
+  mutation: SessionMutationContext,
+  messaging: MessagingDependencies,
+): Promise<CaseActionResult> {
+  if (action.approved !== true || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(action.requestId ?? "")) {
+    throw new ApiError(400, "Review and explicitly approve this message before sending it.", false, "MESSAGE_APPROVAL_REQUIRED");
+  }
+  const body = typeof action.body === "string" ? action.body.trim() : "";
+  if (!body || body.length > 5_000) throw new ApiError(400, "Messages must contain 1 to 5,000 characters.");
+  const previous = document.cases.flatMap((item) => item.messages.map((message) => ({ record: item, message })))
+    .find(({ message }) => message.requestId === action.requestId);
+  if (previous && previous.record.id !== caseRecord.id) {
+    throw new ApiError(409, "This send request belongs to another case.", false, "MESSAGE_REQUEST_CONFLICT");
+  }
+  const recipient = caseRecord.landlordContact.trim();
+  const attempt: CaseMessage = {
+    id: randomUUID(), sender: "tenant", body, createdAt: now(), attemptedAt: now(),
+    delivery: "pending", provider: process.env.PHOTON_LIVE_SEND === "true" ? "spectrum" : "demo",
+    caseId: caseRecord.id, recipient, requestId: action.requestId,
+  };
+  let prepared: ReturnType<typeof prepareLandlordMessage>;
+  try { prepared = messaging.prepare(caseRecord, body); }
+  catch (error) {
+    if (previous) throw new ApiError(409, "This request already has a recorded result. Refresh the case before taking another action.", false,
+      "MESSAGE_REQUEST_CONFLICT", undefined, caseRecord);
+    if (caseRecord.messages.length >= 200) throw new ApiError(409, "This case has reached its message limit.");
+    caseRecord.messages.push(attempt);
+    messageFailure(caseRecord, attempt, error, false);
+  }
+  if (previous) {
+    if (previous.message.body !== prepared.body || previous.message.recipient !== prepared.recipient) {
+      throw new ApiError(409, "This request ID was already used for different message content or a different recipient.", false,
+        "MESSAGE_REQUEST_CONFLICT", undefined, caseRecord);
+    }
+    if (previous.message.delivery === "sent" || previous.message.delivery === "demo") return { case: caseRecord };
+    throw new ApiError(409, "This send attempt is already recorded and will not be resent. Check its delivery status.", false,
+      "MESSAGE_ALREADY_ATTEMPTED", undefined, caseRecord);
+  }
+  const sameContent = caseRecord.messages.filter((message) => message.sender === "tenant"
+    && message.recipient === prepared.recipient && message.body === prepared.body);
+  const legacyHash = createHash("sha256").update(recipient).update("\0").update(body).digest("hex");
+  if (sameContent.some((message) => message.delivery === "pending" || message.delivery === "uncertain")
+    || document.uncertainDeliveries?.some((attempt) => attempt.caseId === caseRecord.id && attempt.messageHash === legacyHash)) {
+    throw new ApiError(409, "This message has a pending or uncertain delivery. Check the provider conversation before taking further action.", false,
+      "MESSAGE_DELIVERY_UNCERTAIN", undefined, caseRecord);
+  }
+  if (sameContent.some((message) => message.provider === prepared.provider
+    && (message.delivery === "sent" || message.delivery === "demo"))) return { case: caseRecord };
+  if (caseRecord.messages.length >= 200) throw new ApiError(409, "This case has reached its message limit.");
+  Object.assign(attempt, prepared);
+  caseRecord.messages.push(attempt);
+  event(caseRecord, "Message approved", "Tenant approved the recorded message and recipient. Delivery has not yet been confirmed.", "message");
+  // Persist the reservation before dispatch so a crash or Mongo CAS conflict cannot cause a blind resend.
+  await mutation.checkpoint();
+  try {
+    const result = await messaging.send(caseRecord, body);
+    Object.assign(attempt, result);
+    delete attempt.failureReason;
+  } catch (error) { messageFailure(caseRecord, attempt, error, true); }
+  event(caseRecord, attempt.delivery === "demo" ? "Notice saved in demo" : "Notice sent", attempt.body, "message");
+  updateStatus(caseRecord);
+  return { case: caseRecord };
 }
 
 function assertMutable(caseRecord: CaseRecord) {
@@ -372,6 +458,7 @@ async function applyAction(
   caseRecord: CaseRecord,
   action: CaseAction,
   mutation: SessionMutationContext,
+  messaging: MessagingDependencies,
 ): Promise<CaseActionResult> {
   if (action.action === "xrpl_security_demo") {
     if (!caseRecord.xrplSettlement) {
@@ -542,31 +629,7 @@ async function applyAction(
       break;
     }
     case "send_message": {
-      if (caseRecord.messages.length >= 200) throw new ApiError(409, "This case has reached its demo message limit.");
-      const messageHash = createHash("sha256").update(caseRecord.landlordContact).update("\0").update(action.body.trim()).digest("hex");
-      document.uncertainDeliveries = (document.uncertainDeliveries ?? []).filter(
-        (attempt) => Date.now() - Date.parse(attempt.createdAt) < UNCERTAIN_DELIVERY_RETRY_DELAY_MS,
-      );
-      if (document.uncertainDeliveries.some((attempt) => attempt.caseId === caseRecord.id && attempt.messageHash === messageHash)) {
-        throw new ApiError(409, "This message may already have been sent. Identical retries are blocked for five minutes after uncertain delivery. Check the recipient's conversation before trying again.");
-      }
-      let result: { delivery: "demo" | "sent" };
-      try {
-        result = await sendLandlordMessage(caseRecord, action.body);
-      } catch (error) {
-        if (error instanceof IntegrationError && error.code === "uncertain_delivery") {
-          document.uncertainDeliveries.push({ caseId: caseRecord.id, messageHash, createdAt: now() });
-          event(caseRecord, "Message delivery uncertain", `${error.message} Message: ${action.body}`, "message");
-          throw new ApiError(503, `${error.message} Identical retries are blocked for five minutes.`, true);
-        }
-        throw error;
-      }
-      caseRecord.messages.push({
-        id: randomUUID(), sender: "tenant", body: action.body, createdAt: now(), delivery: result.delivery,
-      });
-      event(caseRecord, result.delivery === "demo" ? "Notice saved in demo" : "Notice sent", action.body, "message");
-      updateStatus(caseRecord);
-      break;
+      return sendApprovedMessage(document, caseRecord, action, mutation, messaging);
     }
     case "simulate_landlord_reply": {
       const completed = action.variant === "completed";
@@ -757,7 +820,71 @@ async function applyAction(
   return { case: caseRecord };
 }
 
-export async function performCaseAction(ownerId: string, caseId: string, action: CaseAction) {
+export interface IncomingLandlordMessage {
+  id: string;
+  conversationId: string;
+  sender: string;
+  body: string;
+  createdAt: string;
+  sendingLine?: string;
+  replyToMessageId?: string;
+}
+
+/** Server worker only: its authenticated SDK stream must already exclude outbound and group messages. */
+export async function receiveLandlordMessage(ownerId: string, caseId: string, incoming: IncomingLandlordMessage) {
+  const config = getPhotonConfig();
+  if (!config || ownerId !== config.tenantId || caseId !== config.caseId) {
+    throw new ApiError(403, "The incoming message is not bound to the configured tenant and case.", false, "MESSAGE_BINDING_REJECTED");
+  }
+  const body = typeof incoming.body === "string" ? incoming.body.trim() : "";
+  const validIdentifier = (value: unknown) => typeof value === "string" && value.length > 0 && value.length <= 500 && !/[\u0000-\u001f\u007f]/.test(value);
+  if (!validIdentifier(incoming.id) || !validIdentifier(incoming.conversationId) || !body || body.length > 5_000
+    || (incoming.replyToMessageId !== undefined && !validIdentifier(incoming.replyToMessageId))
+    || typeof incoming.createdAt !== "string" || !Number.isFinite(Date.parse(incoming.createdAt))
+    || Date.parse(incoming.createdAt) > Date.now() + 5 * 60_000) {
+    throw new ApiError(400, "The incoming message has invalid provider metadata.", false, "MESSAGE_INVALID_EVENT");
+  }
+  return mutateSession(ownerId, async (document) => {
+    const caseRecord = findCase(document, caseId);
+    if (incoming.sender !== config.allowedRecipient || incoming.sender !== caseRecord.landlordContact.trim()) {
+      throw new ApiError(403, "The sender is not the approved landlord contact for this case.", false, "MESSAGE_BINDING_REJECTED");
+    }
+    const matches = document.cases.flatMap((record) => record.messages
+      .filter((message) => message.sender === "tenant" && message.provider === "spectrum" && message.delivery === "sent"
+        && message.providerConversationId === incoming.conversationId && message.recipient === incoming.sender
+        && message.sendingLine === incoming.sendingLine)
+      .map((message) => ({ record, message })));
+    if (!matches.length || matches.some(({ record }) => record.id !== caseId || record.ownerId !== ownerId)
+      || (config.sendingLine && incoming.sendingLine !== config.sendingLine)) {
+      throw new ApiError(403, "No unambiguous approved conversation matches this reply.", false, "MESSAGE_BINDING_REJECTED");
+    }
+    const sentTimes = matches.map(({ message }) => Date.parse(message.sentAt ?? message.createdAt));
+    if (sentTimes.some((value) => !Number.isFinite(value)) || Date.parse(incoming.createdAt) < Math.min(...sentTimes)
+      || (incoming.replyToMessageId && !matches.some(({ message }) => message.providerMessageId === incoming.replyToMessageId))) {
+      throw new ApiError(403, "This reply does not follow an approved message in the bound conversation.", false, "MESSAGE_BINDING_REJECTED");
+    }
+    const existing = document.cases.flatMap((record) => record.messages.map((message) => ({ record, message })))
+      .find(({ message }) => message.provider === "spectrum" && message.providerMessageId === incoming.id);
+    if (existing) {
+      if (existing.record.id !== caseId || existing.message.sender !== "landlord" || existing.message.body !== body
+        || existing.message.providerConversationId !== incoming.conversationId) {
+        throw new ApiError(409, "The provider message ID is already bound to different content.", false, "MESSAGE_EVENT_CONFLICT");
+      }
+      return { case: caseRecord };
+    }
+    await assertSessionNoPendingSettlement(document);
+    assertMutable(caseRecord);
+    if (caseRecord.messages.length >= 200) throw new ApiError(409, "This case has reached its message limit.");
+    const classification = await classifyLandlordReply(body, caseRecord, new Date(incoming.createdAt));
+    const message = applyLandlordReply(caseRecord, body, "received", classification);
+    Object.assign(message, { provider: "spectrum", caseId, recipient: incoming.sender,
+      providerMessageId: incoming.id, providerConversationId: incoming.conversationId,
+      sendingLine: incoming.sendingLine, createdAt: new Date(incoming.createdAt).toISOString() });
+    return { case: caseRecord };
+  });
+}
+
+export async function performCaseAction(ownerId: string, caseId: string, action: CaseAction, messaging = defaultMessaging) {
   if (action.action === "enable_xrpl") assertXrplStorageCapability();
-  return mutateSession(ownerId, (document, mutation) => applyAction(document, findCase(document, caseId), action, mutation));
+  return mutateSession(ownerId, (document, mutation) => applyAction(document, findCase(document, caseId), action, mutation, messaging));
 }

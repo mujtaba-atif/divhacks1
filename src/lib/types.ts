@@ -58,7 +58,17 @@ export interface CaseMessage {
   sender: "tenant" | "agent" | "landlord";
   body: string;
   createdAt: string;
-  delivery: "demo" | "sent" | "received";
+  delivery: "demo" | "sent" | "received" | "pending" | "failed" | "uncertain";
+  provider?: "demo" | "spectrum" | "photon";
+  caseId?: string;
+  recipient?: string;
+  providerMessageId?: string;
+  providerConversationId?: string;
+  sendingLine?: string;
+  requestId?: string;
+  attemptedAt?: string;
+  sentAt?: string;
+  failureReason?: string;
   classification?: LandlordReplyClassification;
 }
 
@@ -296,7 +306,7 @@ export interface TransactionIntent {
 export type CaseAction =
   | { action: "add_demo_evidence"; stage: "before" | "after" }
   | { action: "analyze_evidence"; evidenceId: string }
-  | { action: "send_message"; body: string }
+  | { action: "send_message"; body: string; approved: true; requestId: string }
   | { action: "simulate_landlord_reply"; variant: "scheduled" | "completed" }
   | { action: "record_landlord_reply"; body: string }
   | { action: "create_escrow" }

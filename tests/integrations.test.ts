@@ -106,7 +106,8 @@ test("Nessie uses explicit mock account and rent payee with integer cents", asyn
 });
 
 test("Photon cannot send without opt-in and an exact approved recipient", async (t) => {
-  const restore = environment({ PHOTON_LIVE_SEND: undefined, PHOTON_PROXY_TOKEN: "not-a-real-token", PHOTON_ALLOWED_RECIPIENT: "+12125550100" });
+  const restore = environment({ PHOTON_LIVE_SEND: undefined, SPECTRUM_PROJECT_ID: "offline-project", SPECTRUM_PROJECT_SECRET: "offline-secret",
+    PHOTON_ALLOWED_RECIPIENT: "+12125550100", PHOTON_TENANT_ID: "test", PHOTON_CASE_ID: "RE-1042", SPECTRUM_SENDING_LINE: undefined });
   t.after(restore);
   const fetch = t.mock.method(globalThis, "fetch", async () => { throw new Error("Must not contact provider"); });
   const record = createDemoCase("test");
@@ -123,16 +124,28 @@ test("Photon cannot send without opt-in and an exact approved recipient", async 
 });
 
 test("Photon reports uncertain delivery when a dispatched request loses its receipt", async (t) => {
-  const restore = environment({ PHOTON_LIVE_SEND: "true", PHOTON_PROXY_TOKEN: "not-a-real-token", PHOTON_ALLOWED_RECIPIENT: "+12125550100" });
+  const restore = environment({ PHOTON_LIVE_SEND: "true", SPECTRUM_PROJECT_ID: "offline-project", SPECTRUM_PROJECT_SECRET: "offline-secret",
+    PHOTON_ALLOWED_RECIPIENT: "+12125550100", PHOTON_TENANT_ID: "test", PHOTON_CASE_ID: "RE-1042", SPECTRUM_SENDING_LINE: undefined });
   t.after(restore);
   const record = createDemoCase("test");
   record.landlordContact = "+12125550100";
-  let response: "timeout" | "invalid-json" | "mismatch" | "success" = "timeout";
-  const fetch = t.mock.method(globalThis, "fetch", async () => {
-    if (response === "timeout") throw new DOMException("Receipt timed out after acceptance", "TimeoutError");
-    if (response === "invalid-json") return new Response("not-json", { status: 200 });
-    return Response.json({ ok: true, data: { id: "provider-message-1", to: response === "mismatch" ? "+12125550101" : record.landlordContact, text: "Please repair the heat.", sentAt: 1 } });
-  });
+  let response: "timeout" | "missing-receipt" | "mismatch" | "success" = "timeout";
+  let sends = 0;
+  const conversationId = `any;-;${record.landlordContact}`;
+  const dependencies = { createApp: async () => ({
+    createDirectMessage: async () => ({
+      id: conversationId, type: "dm", phone: "shared",
+      send: async (body: string) => {
+        sends++;
+        if (response === "timeout") throw new DOMException("Receipt timed out after acceptance", "TimeoutError");
+        if (response === "missing-receipt") return undefined;
+        return { id: "provider-message-1", platform: "imessage", direction: "outbound",
+          space: { id: response === "mismatch" ? "another-conversation" : conversationId },
+          content: { type: "text", text: body }, timestamp: new Date(1) };
+      },
+    }),
+    stop: async () => undefined,
+  }) };
   const uncertain = (error: unknown) => {
     assert.ok(error instanceof DeliveryUncertainError);
     assert.equal(error.code, "uncertain_delivery");
@@ -140,14 +153,14 @@ test("Photon reports uncertain delivery when a dispatched request loses its rece
     assert.match(error.message, /Check delivery before retrying/);
     return true;
   };
-  await assert.rejects(sendLandlordMessage(record, "Please repair the heat."), uncertain);
-  response = "invalid-json";
-  await assert.rejects(sendLandlordMessage(record, "Please repair the heat."), uncertain);
+  await assert.rejects(sendLandlordMessage(record, "Please repair the heat.", dependencies), uncertain);
+  response = "missing-receipt";
+  await assert.rejects(sendLandlordMessage(record, "Please repair the heat.", dependencies), uncertain);
   response = "mismatch";
-  await assert.rejects(sendLandlordMessage(record, "Please repair the heat."), uncertain);
+  await assert.rejects(sendLandlordMessage(record, "Please repair the heat.", dependencies), uncertain);
   response = "success";
-  assert.equal((await sendLandlordMessage(record, "Please repair the heat.")).delivery, "sent");
-  assert.equal(fetch.mock.callCount(), 4);
+  assert.equal((await sendLandlordMessage(record, "Please repair the heat.", dependencies)).delivery, "sent");
+  assert.equal(sends, 4);
 });
 
 test("XRPL final validation rejects post-autofill changes and permits a valid offline signature", () => {

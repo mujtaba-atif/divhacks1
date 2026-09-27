@@ -30,7 +30,7 @@ importers:
         specifier: ^0.0.1
         version: 0.0.1
       spectrum-ts:
-        specifier: ^12.10.1
+        specifier: 12.10.1
         version: 12.10.1(typescript@5.9.3)
       xrpl:
         specifier: ^4.4.0
