@@ -46,7 +46,7 @@ test("listener requires explicit opt-in and never exposes secrets or bodies in l
   assert.equal(await runSpectrumReplies({ ...h.options, enabled: false }), 1);
   assert.equal(h.stopped(), 0);
   assert.equal(await runSpectrumReplies(h.options), 0);
-  assert.deepEqual(h.received, [[config.tenantId, config.caseId, incoming]]);
+  assert.deepEqual(h.received, [[config.tenantId, undefined, incoming]]);
   assert.equal(h.stopped(), 1);
   assert.doesNotMatch(h.logs.join("\n"), /secret|Private reply|15555550123/);
 });

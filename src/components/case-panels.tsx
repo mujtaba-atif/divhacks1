@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowDownLeft, ArrowRight, ArrowUpRight, BadgeCheck, Building2, CalendarDays, Check, CheckCheck, CheckCircle2, ChevronRight, CircleDollarSign, ExternalLink, FileImage, FileText, FlaskConical, ImagePlus, LockKeyhole, Mail, MessageSquare, Paperclip, Plus, RefreshCw, ScanLine, Send, ShieldCheck, ShieldX, Sparkles, Thermometer, Upload, Wallet, Wrench } from "lucide-react";
 import type { CaseAction, CaseMessage, CaseRecord, EvidenceRecord, EvidenceStage, IntegrationStatus, PolicyResult } from "@/lib/types";
+import { normalizeMessagingContact } from "@/lib/messaging-contact";
 import { Button, CheckRow, EmptyState, fullDate, money, SectionHeading, shortDate, time } from "./workspace-ui";
 
 export type WorkspaceTab = "overview" | "evidence" | "messages" | "finances" | "escrow";
@@ -160,7 +161,7 @@ export function EvidencePanel({ record, pending, onAction, onUpload, onPreview, 
 }
 
 export function draftNotice(record: CaseRecord) {
-  return `Hello ${record.landlordName},\n\nI'm writing about the ${record.issue === "heating" ? "lack of heat" : record.issue + " issue"} in apartment ${record.apartment} at ${record.building.address}, first noticed on ${fullDate(record.noticedAt)}.\n\n${record.description}\n\nI've documented the issue and would appreciate a repair timeline. Please confirm when someone can inspect the apartment and complete the necessary repair.\n\nThank you.`;
+  return `Hello ${record.landlordName},\n\nI'm writing about the ${record.issue === "heating" ? "lack of heat" : record.issue + " issue"} in apartment ${record.apartment} at ${record.building.address}, first noticed on ${fullDate(record.noticedAt)}.\n\n${record.description}\n\nI've documented the issue and would appreciate a repair timeline. Please confirm when someone can inspect the apartment and complete the necessary repair.\n\n${record.tenant ? `Thank you,\n${record.tenant.name}` : "Thank you."}`;
 }
 
 function canonicalMessageBody(body: string, caseId: string) {
@@ -172,7 +173,7 @@ function canonicalMessageBody(body: string, caseId: string) {
 export function findOutboundMessage(record: CaseRecord, body: string, requestId?: string) {
   return record.messages.find((message) => message.sender === "tenant" && requestId && message.requestId === requestId)
     ?? [...record.messages].reverse().find((message) => message.sender === "tenant"
-      && message.recipient === record.landlordContact.trim()
+      && normalizeMessagingContact(message.recipient) === normalizeMessagingContact(record.landlordContact)
       && canonicalMessageBody(message.body, record.id) === canonicalMessageBody(body, record.id));
 }
 
@@ -192,7 +193,7 @@ export function MessagesPanel({ record, pending, onAction, integration }: Common
   const [approved, setApproved] = useState(false);
   const [localError, setLocalError] = useState("");
   const requestId = useRef<string | null>(null);
-  useEffect(() => { setDraft(draftNotice(record)); setApproved(false); setLocalError(""); requestId.current = null; }, [record.id]); // Never reuse another case's draft or approval.
+  useEffect(() => { setDraft(draftNotice(record)); setApproved(false); setLocalError(""); requestId.current = null; }, [record.id, record.landlordName, record.landlordContact, record.tenant?.name]); // Changed roles or recipients require fresh approval.
   const resolved = record.status === "resolved";
   const liveDelivery = integration?.status === "configured";
   const deliveryUnavailable = !liveDelivery && integration?.status !== "demo";

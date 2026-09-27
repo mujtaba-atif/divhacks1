@@ -271,6 +271,12 @@ export interface EscrowRecord {
 export interface CaseRecord {
   id: string;
   ownerId: string;
+  /** Demo participant details, separate from the authenticated workspace owner ID. */
+  tenant?: { name: string; phone: string };
+  tenantName?: string;
+  tenantPhone?: string;
+  /** Assigned only by server-side demo creation, never accepted from an API caller. */
+  demoMessagingBinding?: { ownerId: string; caseId: string; recipient: string };
   title: string;
   issue: IssueType;
   description: string;

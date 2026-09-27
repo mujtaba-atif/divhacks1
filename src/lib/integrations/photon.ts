@@ -2,6 +2,7 @@ import "server-only";
 
 import { z } from "zod";
 import type { CaseRecord } from "../types";
+import { normalizeMessagingContact } from "../messaging-contact";
 import { assertServer, DeliveryUncertainError, IntegrationError } from "./shared";
 import { createSpectrumClient, stopSpectrumClient, withSpectrumTimeout, type SpectrumClient } from "./spectrum";
 
@@ -35,7 +36,6 @@ export interface PhotonDependencies {
   shutdownTimeoutMs?: number;
 }
 
-const recipientPattern = /^(?:\+[1-9]\d{7,14}|[^\s@]+@[^\s@]+\.[^\s@]+)$/;
 const sendReceiptSchema = z.object({
   id: z.string().min(1).max(500),
   platform: z.literal("imessage"),
@@ -52,11 +52,11 @@ export function getPhotonConfig(): PhotonConfig | undefined {
   if (process.env.PHOTON_LIVE_SEND !== "true") return undefined;
   const projectId = process.env.SPECTRUM_PROJECT_ID?.trim();
   const projectSecret = process.env.SPECTRUM_PROJECT_SECRET?.trim();
-  const allowedRecipient = process.env.PHOTON_ALLOWED_RECIPIENT?.trim();
+  const allowedRecipient = normalizeMessagingContact(process.env.PHOTON_ALLOWED_RECIPIENT);
   const tenantId = process.env.PHOTON_TENANT_ID?.trim();
   const caseId = process.env.PHOTON_CASE_ID?.trim();
   const sendingLine = process.env.SPECTRUM_SENDING_LINE?.trim() || undefined;
-  if (!projectId || !projectSecret || !allowedRecipient || !recipientPattern.test(allowedRecipient)
+  if (!projectId || !projectSecret || !allowedRecipient
     || !tenantId || !caseId || (sendingLine && sendingLine !== "shared" && !/^\+[1-9]\d{7,14}$/.test(sendingLine))) {
     throw new IntegrationError(
       "Photon live sending requires Spectrum project credentials and an approved tenant, case, recipient, and valid optional sending line.",
@@ -66,14 +66,25 @@ export function getPhotonConfig(): PhotonConfig | undefined {
   return { provider: "spectrum", projectId, projectSecret, allowedRecipient, tenantId, caseId, ...(sendingLine ? { sendingLine } : {}) };
 }
 
+export function isPhotonCaseBound(record: CaseRecord, config: PhotonConfig): boolean {
+  const recipient = normalizeMessagingContact(record.landlordContact);
+  const binding = record.demoMessagingBinding;
+  const approvedCase = record.id === config.caseId || (record.case_type === undefined
+    && binding?.ownerId === record.ownerId && binding.caseId === record.id
+    && binding.recipient === recipient);
+  return record.ownerId === config.tenantId && approvedCase && recipient === config.allowedRecipient;
+}
+
 function prepareWithConfig(record: CaseRecord, body: string, config: PhotonConfig | undefined): PreparedLandlordMessage {
   const text = body.trim();
   if (!text || text.length > 10_000 || record.status === "resolved" || !/^[a-zA-Z0-9-]{1,80}$/.test(record.id)) {
     throw new IntegrationError("A nonempty message, valid case reference, and active case are required.", "Photon", "invalid_input");
   }
-  const recipient = record.landlordContact.trim();
-  if (config && (record.ownerId !== config.tenantId || record.id !== config.caseId
-    || recipient !== config.allowedRecipient || !recipientPattern.test(recipient))) {
+  const recipient = normalizeMessagingContact(record.landlordContact);
+  if (!recipient) {
+    throw new IntegrationError("This case has no valid landlord contact. Configure its recipient before sending.", "Photon", "rejected");
+  }
+  if (config && !isPhotonCaseBound(record, config)) {
     throw new IntegrationError("This tenant, case, or landlord contact is not the approved Photon messaging binding.", "Photon", "rejected");
   }
   const reference = `\n\nRentEscrow case: ${record.id}`;

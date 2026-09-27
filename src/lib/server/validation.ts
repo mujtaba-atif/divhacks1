@@ -12,8 +12,9 @@ export const newCaseSchema = z.object({
   address: text(240),
   borough,
   apartment: text(30),
-  landlordName: text(160),
-  landlordContact: text(240),
+  // This endpoint creates demo cases; the server assigns their participants.
+  landlordName: z.string().trim().max(160).nullish().transform((value) => value ?? ""),
+  landlordContact: z.string().trim().max(240).nullish().transform((value) => value ?? ""),
   monthlyRentCents: cents,
   disputedAmountCents: cents,
 }).strict().refine((value) => value.disputedAmountCents <= value.monthlyRentCents, {

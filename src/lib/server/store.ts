@@ -8,6 +8,7 @@ import type { CaseRecord } from "@/lib/types";
 import type { RegisteredUser } from "./auth";
 import type { DigitalContract } from "./contracts";
 import { ApiError } from "./errors";
+import { assignDemoParticipants } from "./demo-case";
 import { readXrplJournal } from "./xrpl-journal";
 import { assertSessionSize, readMongoSession, saveMongoSession } from "./mongodb-store";
 
@@ -101,7 +102,7 @@ async function saveSession(document: SessionDocument, expectedRevision?: number)
 }
 
 function seedSession(ownerId: string): SessionDocument {
-  const demoCase = createDemoCase(ownerId);
+  const demoCase = assignDemoParticipants(createDemoCase(ownerId));
   const now = new Date().toISOString();
   return {
     ownerId,
