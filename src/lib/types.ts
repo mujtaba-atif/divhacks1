@@ -1,3 +1,5 @@
+import type { DigitalContract, ContractPolicyDecision } from "./contract-types";
+
 export type IssueType = "heating" | "mold" | "leak" | "pests" | "elevator" | "other";
 export type CaseType = "bilateral" | "self_documentation";
 export type CaseStatus = "open" | "awaiting_repair" | "verification" | "verified" | "resolved";
@@ -308,7 +310,16 @@ export interface PolicyResult {
   reasonCodes?: NessieReasonCode[];
 }
 
-export interface AuditRecord {
+export interface ContractSettlementReference {
+  contractId?: string;
+  contractPolicyVersion?: string;
+  policyHash?: string;
+  triggeringEvent?: string;
+}
+
+export interface AuditRecord extends ContractSettlementReference {
+  evaluatedRules?: PolicyCheck[];
+  contractDecision?: ContractPolicyDecision;
   id: string;
   action: "EscrowCreate" | "EscrowFinish" | "PolicyCheck" | "Payment";
   createdAt: string;
@@ -335,13 +346,35 @@ export interface AuditRecord {
   submitted?: boolean;
   policyDecision?: PolicyResult;
   actor?: "tenant" | "settlement_agent";
+  agentId?: string;
+  policyVersion?: string;
+  asset?: string;
+  amount?: string;
+  approvedAmount?: string;
+  issuer?: string;
+  currency?: string;
+  transactionHash?: string;
+  validatedResult?: string;
+  timestamp?: string;
 }
 
 /** Public authorization and receipt only. Never store signing keys here. */
-export interface XrplSettlement {
+export interface XrplSettlement extends ContractSettlementReference {
   id: string;
   caseId: string;
   ownerId: string;
+  /** Optional only to preserve historical XRP permissions and receipts. */
+  agentId?: string;
+  policyVersion?: string;
+  asset?: "XRP" | "RLUSD";
+  amount?: string;
+  issuer?: string;
+  currency?: string;
+  requestedAction?: "REQUEST_SETTLEMENT" | "RELEASE_RENT";
+  policyDecision?: PolicyResult;
+  transactionHash?: string;
+  validatedResult?: string;
+  timestamp?: string;
   /** Pinned participant identities; optional only for reading historical receipts. */
   tenantUserId?: string;
   landlordUserId?: string;
@@ -367,7 +400,7 @@ export interface XrplSettlement {
   detail?: string;
 }
 
-export interface XrplSettlementIntent {
+export interface XrplSettlementIntent extends ContractSettlementReference {
   caseId: string;
   ownerId: string;
   escrowId: string;
@@ -379,6 +412,12 @@ export interface XrplSettlementIntent {
   destination: string;
   amountDrops: string;
   amountUsdCents: number;
+  agentId?: string;
+  policyVersion?: string;
+  asset?: string;
+  amount?: string;
+  issuer?: string;
+  currency?: string;
   tenantUserId?: string;
   landlordUserId?: string;
   landlordWallet?: string;
@@ -394,7 +433,8 @@ export interface FinancialPolicyContext {
 }
 
 export type XrplSecurityScenario = "wallet_switch" | "amount_tamper" | "prompt_injection"
-  | "insufficient_funds" | "duplicate" | "wrong_network" | "wrong_case" | "unsupported_action";
+  | "insufficient_funds" | "duplicate" | "wrong_network" | "wrong_case" | "unsupported_action"
+  | "issuer_tamper" | "wrong_asset";
 
 export interface EscrowRecord {
   id: string;
@@ -412,6 +452,15 @@ export interface EscrowRecord {
 }
 
 export interface CaseRecord {
+  contractId?: string;
+  /** Server-refreshed copy of the immutable signed agreement; never accepted from request JSON. */
+  contractSnapshot?: DigitalContract;
+  contractDispute?: "none" | "open" | "resolved";
+  contractEvaluation?: ContractPolicyDecision;
+  contractEvaluatedAt?: string;
+  contractEvaluationFingerprint?: string;
+  contractTrigger?: string;
+  contractEffects?: { lateFeeCents?: number; monetaryDefault?: boolean; nonMonetaryDefault?: boolean };
   id: string;
   ownerId: string;
   tenantUserId?: string;
@@ -484,7 +533,14 @@ export interface TransactionIntent {
   nessieAccountId?: string;
 }
 
+export type ContractSecurityScenario = "wallet_switch" | "amount_tamper" | "issuer_tamper" | "wrong_network"
+  | "duplicate" | "excess_fee" | "unsupported_action" | "mutate_terms"
+  | "prompt_injection" | "insufficient_funds" | "wrong_case" | "wrong_asset";
+
 export type CaseAction =
+  | { action: "open_contract_dispute" }
+  | { action: "evaluate_contract" }
+  | { action: "contract_security_demo"; scenario: ContractSecurityScenario }
   | { action: "add_demo_evidence"; stage: "before" | "after" }
   | { action: "analyze_evidence"; evidenceId: string }
   | { action: "send_message"; body: string; approved: true; requestId: string }

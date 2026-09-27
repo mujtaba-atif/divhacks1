@@ -1,4 +1,11 @@
 import type { CaseRecord, NessieReasonCode, PolicyCheck, PolicyResult, TransactionIntent, XrplSettlementIntent } from "./types";
+import {
+  SETTLEMENT_AGENT_ID,
+  SETTLEMENT_POLICY_VERSION,
+  sameAssetPermission,
+  settlementAmount,
+  validAssetPermission,
+} from "./xrpl-assets";
 
 export function makeIntent(record: CaseRecord, transactionType: string): TransactionIntent {
   return {
@@ -76,14 +83,23 @@ export function evaluatePolicy(record: CaseRecord, intent: TransactionIntent): P
     finishing ? record.escrow.status === "locked" : record.escrow.status === "unfunded",
     "An escrow can only be funded once and released once.");
   check("status", finishing ? "Case is verified" : "Case is active",
-    finishing ? record.status === "verified" : record.status !== "resolved",
+    finishing ? (record.contractId ? record.status !== "resolved" : record.status === "verified") : record.status !== "resolved",
     finishing ? "The case must be verified before settlement." : "A resolved case cannot authorize new transactions.");
-  if (finishing) {
+  if (record.contractId) {
+    const agreement = record.contractSnapshot;
+    check("contract", "Active signed agreement", agreement?.id === record.contractId && agreement.status === "active"
+      && agreement.policyHash === record.contractEvaluation?.policyHash,
+    "Financial authority comes from the immutable agreement accepted by both parties.");
+    if (finishing) check("contract-policy", "Signed contract allows release", record.contractEvaluation?.allowed === true
+      && record.contractEvaluation.action === "RELEASE_RENT", record.contractEvaluation?.reason ?? "Contract evaluation is required.");
+  }
+  if (finishing && (!record.contractId || record.contractDispute !== "none")) {
+    const rules = record.contractSnapshot?.policy?.repairRules;
     const latestAfter = record.evidence.filter((item) => item.stage === "after").at(-1);
-    check("repair", "Repair reported complete", record.repairReported, "A repair completion report is required.");
-    check("evidence", "Updated evidence analyzed", latestAfter?.analysis?.verified === true, "The latest after-repair evidence must have a passing analysis.");
-    check("verification", "Repair verification passed", record.verification?.verified === true, "The current evidence comparison must pass.");
-    check("confirmation", "Tenant confirmed resolution", record.tenantConfirmed, "Only the tenant can confirm the issue is resolved.");
+    check("repair", "Repair reported complete", rules?.repairReportedRequired === false || record.repairReported, "A repair completion report is required.");
+    check("evidence", "Updated evidence analyzed", rules?.evidenceVerifiedRequired === false || latestAfter?.analysis?.verified === true, "The latest after-repair evidence must have a passing analysis.");
+    check("verification", "Repair verification passed", rules?.evidenceVerifiedRequired === false || record.verification?.verified === true, "The current evidence comparison must pass.");
+    check("confirmation", "Tenant confirmed resolution", rules?.tenantConfirmationRequired === false || record.tenantConfirmed, "Only the tenant can confirm the issue is resolved.");
     if (record.escrow.network === "testnet") {
       check("live-evidence", "Non-demo evidence verified", record.verification?.source === "gemini"
         && !!latestAfter && !latestAfter.isDemo && latestAfter.analysis?.source === "gemini" && latestAfter.analysis.verified,
@@ -103,13 +119,23 @@ export function makeXrplIntent(record: CaseRecord): XrplSettlementIntent {
   const settlement = record.xrplSettlement;
   return {
     caseId: record.id, ownerId: record.ownerId, escrowId: record.escrow.id,
-    settlementId: settlement?.id ?? "", requestedAction: "REQUEST_SETTLEMENT_REVIEW",
+    settlementId: settlement?.id ?? "", requestedAction: settlement?.contractId ? "RELEASE_RENT" : settlement?.agentId ? "REQUEST_SETTLEMENT" : "REQUEST_SETTLEMENT_REVIEW",
     transactionType: "Payment", network: settlement?.network ?? "testnet",
     source: settlement?.source ?? "", destination: settlement?.destination ?? "",
     amountDrops: settlement?.amountDrops ?? "0", amountUsdCents: record.disputedAmountCents,
     ...(settlement?.tenantUserId ? { tenantUserId: settlement.tenantUserId } : {}),
     ...(settlement?.landlordUserId ? { landlordUserId: settlement.landlordUserId } : {}),
     ...(settlement?.landlordWallet ? { landlordWallet: settlement.landlordWallet } : {}),
+    // Append new fields after the historical intent shape so an old durable
+    // journal remains byte-for-byte comparable during recovery.
+    ...(settlement?.agentId ? { agentId: settlement.agentId } : {}),
+    ...(settlement?.policyVersion ? { policyVersion: settlement.policyVersion } : {}),
+    ...(settlement?.asset ? { asset: settlement.asset } : {}),
+    ...(settlement?.amount ? { amount: settlement.amount } : {}),
+    ...(settlement?.issuer ? { issuer: settlement.issuer } : {}),
+    ...(settlement?.currency ? { currency: settlement.currency } : {}),
+    ...(settlement?.contractId ? { contractId: settlement.contractId, contractPolicyVersion: settlement.contractPolicyVersion,
+      policyHash: settlement.policyHash, triggeringEvent: settlement.triggeringEvent } : {}),
   };
 }
 
@@ -143,27 +169,65 @@ export function evaluateXrplPolicy(record: CaseRecord, intent: XrplSettlementInt
     && !!settlement.landlordWallet && settlement.landlordWallet === record.escrow.destination
     && intent.landlordWallet === settlement.landlordWallet,
   "The assigned landlord and approved case beneficiary must match the pinned Testnet recipient authorization.");
-  check("ACTION_OUTSIDE_PERMISSION_SCOPE", "Settlement review only", intent.requestedAction === "REQUEST_SETTLEMENT_REVIEW"
+  const isLegacyPermission = !settlement?.agentId;
+  check("ACTION_OUTSIDE_PERMISSION_SCOPE", "Case settlement only",
+    intent.requestedAction === (settlement?.contractId ? "RELEASE_RENT" : isLegacyPermission ? "REQUEST_SETTLEMENT_REVIEW" : "REQUEST_SETTLEMENT")
+    && (isLegacyPermission ? settlement?.requestedAction === undefined : settlement?.requestedAction === (settlement?.contractId ? "RELEASE_RENT" : "REQUEST_SETTLEMENT"))
     && intent.transactionType === "Payment" && settlement?.transactionType === "Payment",
   "Only the bound RentEscrow Testnet settlement Payment is permitted.");
+  check("AGENT_IDENTITY_MISMATCH", "Approved settlement agent", isLegacyPermission
+    ? intent.agentId === undefined && settlement?.policyVersion === undefined && intent.policyVersion === undefined
+    : settlement?.agentId === SETTLEMENT_AGENT_ID && intent.agentId === settlement.agentId,
+  "Only the server-configured RentEscrow settlement agent may request this case action.");
+  check("POLICY_VERSION_MISMATCH", "Approved settlement policy", isLegacyPermission
+    ? intent.policyVersion === undefined
+    : settlement?.policyVersion === SETTLEMENT_POLICY_VERSION && intent.policyVersion === settlement.policyVersion,
+  "The settlement must use the server-approved deterministic policy version.");
   check("WRONG_NETWORK", "Testnet only", intent.network === "testnet" && settlement?.network === "testnet"
-    && record.escrow.network === "demo", "Only Test XRP settles on-chain; the application escrow remains simulated USD.");
+    && record.escrow.network === "demo", "Only XRPL Testnet settles on-chain; the application escrow remains simulated USD.");
   check("SOURCE_WALLET_MISMATCH", "Authorized tenant wallet", !!settlement?.source && intent.source === settlement.source,
     "The source must match the case's pinned tenant wallet.");
   check("DESTINATION_WALLET_MISMATCH", "Authorized landlord wallet", !!settlement?.destination
     && intent.destination === settlement.destination && intent.source !== intent.destination,
   `The destination must match the authorized counterparty for ${record.id}.`);
-  check("AMOUNT_OUTSIDE_AUTHORIZATION", "Exact approved Test XRP amount", !!settlement
-    && /^[1-9]\d{0,8}$/.test(intent.amountDrops) && BigInt(intent.amountDrops) <= 100_000_000n
+  const settlementAssetValid = !!settlement && (isLegacyPermission
+    ? validAssetPermission({ amountDrops: settlement.amountDrops })
+    : validAssetPermission(settlement));
+  check("ASSET_NOT_APPROVED", "Approved settlement asset", settlementAssetValid
+    && (intent.asset ?? "XRP") === (settlement?.asset ?? "XRP"),
+  "Only the asset pinned in trusted case state is permitted for this settlement.");
+  check("ASSET_DEFINITION_MISMATCH", "Trusted issuer and currency", !!settlement && settlementAssetValid
+    && sameAssetPermission(intent, settlement),
+  "The amount, currency, and issuer must exactly match the server-pinned asset definition.");
+  check("AMOUNT_OUTSIDE_AUTHORIZATION", "Exact approved on-chain amount", !!settlement
+    && settlementAssetValid && settlementAmount(intent) === settlementAmount(settlement)
     && intent.amountDrops === settlement.amountDrops && intent.amountUsdCents === settlement.amountUsdCents
     && intent.amountUsdCents === record.escrow.amountCents && intent.amountUsdCents === record.disputedAmountCents,
-  "The native Test XRP amount and simulated USD business amount are separately authorized and cannot change.");
+  "The configured Testnet asset amount and simulated USD business amount are separately authorized and cannot change.");
   check("SETTLEMENT_ALREADY_COMPLETED", "Not previously settled", settlement?.status !== "validated",
     "A validated settlement cannot execute again.");
   check("SETTLEMENT_PENDING", "No unresolved transaction", settlement?.status !== "pending" && !settlement?.hash,
     "Reconcile the recorded transaction hash before any new signing attempt.");
-  check("REPAIR_NOT_VERIFIED", "Original evidence present", record.evidence.some((item) => item.stage === "before" && !!item.analysis),
+  check("REPAIR_NOT_VERIFIED", "Original evidence present", (Boolean(record.contractId) && (record.contractDispute === "none"
+    || record.contractSnapshot?.policy?.repairRules.evidenceVerifiedRequired === false))
+    || record.evidence.some((item) => item.stage === "before" && !!item.analysis),
     "Analyzed original evidence must be present along with the verified after-repair evidence.");
+  check("CONTRACT_REQUIRED", "Signed financial authority", !record.tenantUserId || !!record.contractId,
+    "Authenticated settlement requires an active bilateral agreement; per-payment approval cannot replace it.");
+  if (record.contractId || settlement?.contractId) {
+    const agreement = record.contractSnapshot;
+    const authority = agreement?.policy?.settlement;
+    check("CONTRACT_BINDING_MISMATCH", "Agreement and policy hash match", !!agreement && agreement.status === "active"
+      && record.contractId === agreement.id && settlement?.contractId === agreement.id && intent.contractId === agreement.id
+      && agreement.policyHash === settlement?.policyHash && intent.policyHash === agreement.policyHash
+      && settlement?.contractPolicyVersion === agreement.policyVersion && intent.contractPolicyVersion === agreement.policyVersion
+      && !!settlement?.triggeringEvent && intent.triggeringEvent === settlement.triggeringEvent,
+      "Case, immutable signed policy hash and triggering event must match the approved permission.");
+    check("CONTRACT_SETTLEMENT_MISMATCH", "Signed payment terms match", !!authority && intent.asset === authority.asset
+      && intent.amount === authority.amountRlusd && intent.source === authority.source && intent.destination === authority.destination
+      && intent.network === authority.network && intent.issuer === authority.issuer && intent.currency === authority.currency,
+      "Only the asset, issuer, network, wallets and amount in the signed agreement can settle.");
+  }
   for (const [field, value] of Object.entries(record.financialPolicyContext ?? {})) {
     check("FINANCIAL_CONTEXT_NOT_VERIFIED", `Trusted financial context: ${field}`, value === true,
       "A supplied tenant, customer, account binding, or financial readiness check must pass.");

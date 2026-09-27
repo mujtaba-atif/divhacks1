@@ -3,7 +3,8 @@
 A tenant case workspace for the DivHacks 2026 no-heat demonstration. Building
 records, evidence, landlord messages, expenses, repair verification, and a
 guarded simulated USD escrow stay together in one persistent case. An optional,
-case-bound XRPL Testnet Payment provides real on-chain settlement using Test XRP.
+case-bound XRPL Testnet Payment supports RLUSD and Test XRP, with validated
+delivery and a durable audit trail.
 
 ## Run locally
 
@@ -81,32 +82,55 @@ See [configuration, phone demo, routing, and limits](docs/photon-spectrum.md).
 `PHOTON_LIVE_SEND=false` retains clearly labeled demo sends. Provider acceptance
 is not a delivery/read receipt; uncertain sends are never blindly retried.
 
-## XRP Testnet demo
+## RLUSD / XRP Testnet demo
 
 ```sh
 pnpm xrpl:setup-testnet
-pnpm xrpl:prepare-demo --reported
+pnpm xrpl:setup-rlusd --create-recipient --fund
+# If prompted, sign into tryrlusd.com and fund the printed public source address.
+pnpm xrpl:setup-rlusd
+pnpm xrpl:setup-rlusd --check
 pnpm dev
 ```
 
-The one-time setup creates and faucet-funds dedicated tenant and landlord
-Testnet wallets, saves only the tenant signing seed to ignored `.env.local`,
-and preserves existing wallets when rerun. Use `npm run xrpl:setup-testnet` if
-pnpm is unavailable and dependencies are already installed.
+RLUSD extends the existing settlement adapter, policy, signer, locks and journal.
+The setup command verifies Testnet, creates missing trust lines, and checks RLUSD
+plus separate XRP reserves/fees. Seeds stay in ignored `.env.local`; no seed is
+sent to a faucet or browser. The faucet currently requires GitHub sign-in.
 
-In Escrow, set aside the simulated $400 and select **Enable Testnet settlement**,
-then **Review agent authorization → Authorize agent settlement**. After repair
-verification and tenant confirmation, the agent requests the separate **10 Test XRP**
-payment through the existing server policy and signer. Manual review remains available.
-The preparation command creates a labeled sample with a sample landlord report;
-tenant evidence verification and confirmation are still required. This amount is configurable and has no USD
-exchange-rate relationship. Only a validated `tesSUCCESS` receipt closes the case.
-The compromised-agent controls demonstrate wallet switching, amount tampering,
-prompt injection, insufficient funds, replay, wrong network/case, and unsupported
-actions without signing or submitting anything.
+Open **Agreement**. Rayaan and Alex Morgan separately sign the same immutable
+prototype policy with their authenticated accounts. Both signatures activate
+the scoped authority for `rentescrow-settlement-v1`; individual payments need
+no further approval. A contract-bound case event or the scheduled evaluator
+then requests only `{ contractId, caseId, requestedAction: "RELEASE_RENT" }`.
+The backend loads signed terms, refreshes Nessie verification, and uses the
+existing guarded RLUSD Payment path. Exact validated delivery is required.
 
-See [XRP implementation and judge walkthrough](docs/xrpl-demo.md) for the live
-transaction proof, public wallet addresses, configuration, recovery, and limits.
+The demo covers one rent obligation per agreement, **$400 simulated USD** and
+the separately configured **10 Testnet RLUSD**. A dispute holds the full amount
+until fresh repair evidence and tenant factual confirmation pass. Capped late
+fees and defaults are simulated records only. `CONTRACT_POLICY_V1`, its SHA-256
+hash, and the existing `CASE_SETTLEMENT_V1` settlement policy accompany the audit.
+Testnet tokens have no monetary value or conversion relationship to simulated USD.
+
+```sh
+pnpm contracts:evaluate --dry-run  # Read-only evaluation of existing active cases
+pnpm contracts:evaluate            # Runtime worker; may autonomously settle eligible cases
+```
+
+See [the contract signing, policy rules and exact judge flow](docs/contracts-demo.md).
+
+Wallet, amount, network, issuer/currency, asset, prompt-injection, out-of-scope,
+insufficient-funds and replay attacks, plus excessive fees and changed contract
+terms, show **BLOCKED BEFORE SIGNING** and **Nothing signed. Nothing submitted.**
+The existing XRP adapter/dev mode remains available; these signed agreements
+authorize RLUSD only. Failed RLUSD payments never silently switch assets.
+
+Both RLUSD trust lines are live and validated in this workspace. Funding at the
+authenticated faucet is still needed before a real RLUSD settlement can be
+verified. The existing autonomous XRP transaction remains verifiable.
+See [the XRPL/RLUSD setup, live evidence and exact judge walkthrough](docs/xrpl-demo.md)
+for public wallet addresses, environment variables, explorer checks and recovery.
 
 For Atlas, follow [database setup](docs/mongodb-atlas.md), then run
 `pnpm db:check` to verify indexes and a temporary write/read/delete probe.

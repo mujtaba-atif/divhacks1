@@ -4,7 +4,8 @@ import { Client, Wallet, decode, hashes, type Payment, type TxResponse } from "x
 import { createDemoCase } from "../src/lib/seed";
 import { evaluateXrplPolicy, makeXrplIntent } from "../src/lib/policy";
 import { createXrplSettlement, executeXrplSettlement, getXrplConfig, reconcileXrplSettlement,
-  runXrplSecurityDemo, XrplError, type XrplPending } from "../src/lib/integrations/xrpl-settlement";
+  buildXrplPayment, runXrplSecurityDemo, XrplError, type XrplPending } from "../src/lib/integrations/xrpl-settlement";
+import { RLUSD_CURRENCY, RLUSD_TESTNET_ISSUER, SETTLEMENT_AGENT_ID, SETTLEMENT_POLICY_VERSION } from "../src/lib/xrpl-assets";
 
 function fixture(t: TestContext) {
   const wallet = Wallet.generate();
@@ -60,6 +61,90 @@ function ledger(t: TestContext, source: string) {
       tx_json: tx, meta: { TransactionResult: state.result, delivered_amount: state.delivered, TransactionIndex: 0, AffectedNodes: [] } };
     if (state.timeout) throw new Error("Lost response after dispatch");
     return { result: state.tx } as never;
+  });
+  return state;
+}
+
+/** A fully pinned Testnet ledger view: no RPC timing, faucet, or public-network coupling. */
+function rlusdFixture(t: TestContext) {
+  const wallet = Wallet.generate();
+  const destination = Wallet.generate().classicAddress;
+  const values = {
+    XRPL_SETTLEMENT_ENABLED: "true", XRPL_SETTLEMENT_ASSET: "RLUSD", XRPL_NETWORK: "testnet",
+    XRPL_RPC_URL: "wss://s.altnet.rippletest.net:51233", XRPL_TENANT_SEED: wallet.seed!,
+    XRPL_TENANT_ADDRESS: wallet.classicAddress, XRPL_LANDLORD_ADDRESS: Wallet.generate().classicAddress,
+    XRPL_RLUSD_LANDLORD_ADDRESS: destination, XRPL_RLUSD_ISSUER: RLUSD_TESTNET_ISSUER,
+    XRPL_RLUSD_CURRENCY: "RLUSD", XRPL_SETTLEMENT_AMOUNT_RLUSD: "12.5",
+  };
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  t.after(() => { for (const [key, value] of Object.entries(previous)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  } });
+  const record = createDemoCase("authorized-tenant");
+  record.escrow.status = "locked";
+  record.status = "verified";
+  record.repairReported = true;
+  record.tenantConfirmed = true;
+  record.verification = { summary: "Labeled sample verification", severity: "low", verified: true, reasons: [], source: "demo" };
+  record.evidence.push({ id: "after", name: "Sample", mimeType: "image/png", stage: "after", note: "Sample",
+    createdAt: new Date().toISOString(), isDemo: true, analysis: record.verification });
+  record.xrplSettlement = createXrplSettlement(record);
+  return { wallet, destination, record };
+}
+
+function rlusdLedger(t: TestContext, source: string, destination: string) {
+  const state = {
+    sourceBalance: "100", destinationBalance: "0", destinationLimit: "100", linePresent: true, frozen: false,
+    nativeBalance: "50000000", tamper: {} as Record<string, unknown>, validated: true, result: "tesSUCCESS",
+    accountLedgerIndex: 1000,
+    delivered: { currency: RLUSD_CURRENCY, issuer: RLUSD_TESTNET_ISSUER, value: "12.5" } as unknown,
+    signs: 0, submits: 0,
+  };
+  t.mock.method(Client.prototype, "connect", async () => undefined);
+  t.mock.method(Client.prototype, "disconnect", async () => undefined);
+  t.mock.method(Client.prototype, "isConnected", () => true);
+  t.mock.method(Client.prototype, "getLedgerIndex", async () => 1000);
+  t.mock.method(Client.prototype, "request", async (request: Parameters<Client["request"]>[0]) => {
+    if (request.command === "server_info") return { result: { info: { network_id: 1,
+      validated_ledger: { reserve_base_xrp: 1, reserve_inc_xrp: 0.2 } } } } as never;
+    if (request.command === "account_lines") {
+      const account = request.account;
+      const balance = account === source ? state.sourceBalance : state.destinationBalance;
+      return { result: { validated: true, account, ledger_index: 1000, lines: state.linePresent ? [{
+        account: RLUSD_TESTNET_ISSUER, currency: RLUSD_CURRENCY, balance,
+        limit: account === source ? "1000" : state.destinationLimit, quality_in: 0, quality_out: 0,
+        ...(state.frozen ? { freeze: true } : {}),
+      }] : [] } } as never;
+    }
+    if (request.command === "account_info") {
+      const account = request.account;
+      if (account === RLUSD_TESTNET_ISSUER) return { result: { validated: true,
+        ledger_index: state.accountLedgerIndex,
+        account_data: { Account: account, Balance: "100000000", OwnerCount: 0, Sequence: 1, Flags: 0 } } } as never;
+      if (account === destination) return { result: { validated: true,
+        ledger_index: state.accountLedgerIndex,
+        account_data: { Account: account, Balance: "50000000", OwnerCount: 1, Sequence: 2, Flags: 0 } } } as never;
+      return { result: { validated: true,
+        ledger_index: state.accountLedgerIndex,
+        account_data: { Account: source, Balance: state.nativeBalance, OwnerCount: 2, Sequence: 123, Flags: 0 } } } as never;
+    }
+    throw new Error(`Unexpected request ${request.command}`);
+  });
+  t.mock.method(Client.prototype, "autofill", async (tx: Parameters<Client["autofill"]>[0]) => ({
+    ...tx, Fee: "12", Sequence: 123, LastLedgerSequence: 1020, ...state.tamper,
+  }) as never);
+  const sign = Wallet.prototype.sign;
+  t.mock.method(Wallet.prototype, "sign", function (this: Wallet, ...args: Parameters<Wallet["sign"]>) {
+    state.signs++;
+    return sign.apply(this, args);
+  });
+  t.mock.method(Client.prototype, "submitAndWait", async (blob: Parameters<Client["submitAndWait"]>[0]) => {
+    state.submits++;
+    const tx = decode(String(blob)) as unknown as Payment;
+    return { result: { validated: state.validated, hash: hashes.hashSignedTx(String(blob)), ledger_index: 1001, tx_json: {
+      ...tx, Amount: undefined, DeliverMax: tx.Amount,
+    }, meta: { TransactionResult: state.result, delivered_amount: state.delivered, TransactionIndex: 0, AffectedNodes: [] } } } as never;
   });
   return state;
 }
@@ -142,6 +227,99 @@ test("autofill tampering, wrong network, reserves and changed case all block bef
     (e: XrplError) => e.reason === "TENANT_CONFIRMATION_REQUIRED");
   assert.equal(state.signs, 0);
   assert.equal(state.submits, 0);
+});
+
+test("RLUSD config pins Ripple Testnet definition and constructs an exact issued-currency Payment", (t) => {
+  const { record, wallet, destination } = rlusdFixture(t);
+  const config = getXrplConfig();
+  assert.deepEqual(config, {
+    source: wallet.classicAddress, destination, asset: "RLUSD", amount: "12.5", amountDrops: "0",
+    currency: RLUSD_CURRENCY, issuer: RLUSD_TESTNET_ISSUER, network: "testnet",
+  });
+  const intent = makeXrplIntent(record);
+  const payment = buildXrplPayment(intent);
+  assert.deepEqual(payment.Amount, { currency: RLUSD_CURRENCY, issuer: RLUSD_TESTNET_ISSUER, value: "12.5" });
+  assert.equal(payment.TransactionType, "Payment");
+  assert.equal(payment.Destination, destination);
+  assert.equal(intent.agentId, SETTLEMENT_AGENT_ID);
+  assert.equal(intent.policyVersion, SETTLEMENT_POLICY_VERSION);
+  assert.equal(intent.requestedAction, "REQUEST_SETTLEMENT");
+  for (const mutation of [
+    { issuer: Wallet.generate().classicAddress }, { currency: "USD" }, { asset: "XRP" },
+  ]) assert.throws(() => buildXrplPayment({ ...intent, ...mutation }), XrplError);
+  assert.equal(evaluateXrplPolicy(record, { ...intent, amount: "13" }, record.ownerId).approved, false,
+    "only trusted case state can authorize a different valid RLUSD amount");
+});
+
+test("RLUSD signs only the final pinned Payment after validated trust-line readiness and records agent receipt identity", async (t) => {
+  const { record, wallet, destination } = rlusdFixture(t);
+  const state = rlusdLedger(t, wallet.classicAddress, destination);
+  let pending: XrplPending | undefined;
+  const receipt = await executeXrplSettlement({ ownerId: record.ownerId, actor: "settlement_agent",
+    loadCase: async () => structuredClone(record), beforeSubmit: async (value) => { pending = value; } });
+  assert.equal(state.signs, 1);
+  assert.equal(state.submits, 1);
+  assert.equal(pending?.actor, "settlement_agent");
+  assert.equal(pending?.intent.asset, "RLUSD");
+  assert.deepEqual(pending?.intent && buildXrplPayment(pending.intent).Amount,
+    { currency: RLUSD_CURRENCY, issuer: RLUSD_TESTNET_ISSUER, value: "12.5" });
+  assert.equal(receipt.asset, "RLUSD");
+  assert.equal(receipt.amount, "12.5");
+  assert.equal(receipt.issuer, RLUSD_TESTNET_ISSUER);
+  assert.equal(receipt.currency, RLUSD_CURRENCY);
+  assert.equal(receipt.agentId, SETTLEMENT_AGENT_ID);
+  assert.equal(receipt.policyVersion, SETTLEMENT_POLICY_VERSION);
+  assert.equal(receipt.transactionHash, receipt.hash);
+  assert.equal(receipt.validatedResult, "tesSUCCESS");
+  assert.equal(receipt.policyDecision?.approved, true);
+  assert.ok(receipt.policyDecision?.checks.some((check) => check.key === "XRPL_SPENDABLE_BALANCE" && check.passed));
+});
+
+test("RLUSD trust-line, native-fee, and final-transaction failures block before signing", async (t) => {
+  const { record, wallet, destination } = rlusdFixture(t);
+  const state = rlusdLedger(t, wallet.classicAddress, destination);
+  const context = { ownerId: record.ownerId, loadCase: async () => structuredClone(record), beforeSubmit: async () => assert.fail("must not submit") };
+  state.accountLedgerIndex = 999;
+  await assert.rejects(executeXrplSettlement(context), (error: XrplError) => error.reason === "INVALID_LEDGER_DATA");
+  state.accountLedgerIndex = 1000;
+  state.linePresent = false;
+  await assert.rejects(executeXrplSettlement(context), (error: XrplError) => error.reason === "RLUSD_TRUSTLINE_REQUIRED");
+  state.linePresent = true;
+  state.frozen = true;
+  await assert.rejects(executeXrplSettlement(context), (error: XrplError) => error.reason === "RLUSD_TRANSFER_NOT_PERMITTED");
+  state.frozen = false;
+  state.sourceBalance = "12.49";
+  await assert.rejects(executeXrplSettlement(context), (error: XrplError) => error.reason === "INSUFFICIENT_RLUSD_FUNDS");
+  state.sourceBalance = "100";
+  state.destinationLimit = "12.49";
+  await assert.rejects(executeXrplSettlement(context), (error: XrplError) => error.reason === "RLUSD_TRUSTLINE_LIMIT");
+  state.destinationLimit = "100";
+  state.nativeBalance = "1400011"; // reserve + fee - one drop; RLUSD itself cannot pay the fee
+  await assert.rejects(executeXrplSettlement(context), (error: XrplError) => error.reason === "INSUFFICIENT_XRPL_FUNDS");
+  state.nativeBalance = "50000000";
+  state.tamper = { Amount: { currency: RLUSD_CURRENCY, issuer: RLUSD_TESTNET_ISSUER, value: "99" } };
+  await assert.rejects(executeXrplSettlement(context), (error: XrplError) => error.reason === "TRANSACTION_TAMPERED");
+  assert.equal(state.signs, 0);
+  assert.equal(state.submits, 0);
+});
+
+test("RLUSD requires validated tesSUCCESS and exact delivered issuer, currency, and value before settlement receipt", async (t) => {
+  const { record, wallet, destination } = rlusdFixture(t);
+  const state = rlusdLedger(t, wallet.classicAddress, destination);
+  const context = { ownerId: record.ownerId, loadCase: async () => structuredClone(record), beforeSubmit: async () => undefined };
+  state.validated = false;
+  await assert.rejects(executeXrplSettlement(context), (error: XrplError) => error.reason === "XRPL_VALIDATION_PENDING");
+  state.validated = true;
+  state.result = "tecPATH_DRY";
+  await assert.rejects(executeXrplSettlement(context), (error: XrplError) => error.reason === "XRPL_LEDGER_FAILED");
+  state.result = "tesSUCCESS";
+  state.delivered = { currency: RLUSD_CURRENCY, issuer: Wallet.generate().classicAddress, value: "12.5" };
+  await assert.rejects(executeXrplSettlement(context), (error: XrplError) => error.reason === "XRPL_DELIVERED_AMOUNT_MISMATCH");
+  state.delivered = { currency: RLUSD_CURRENCY, issuer: RLUSD_TESTNET_ISSUER, value: "12.49" };
+  await assert.rejects(executeXrplSettlement(context), (error: XrplError) => error.reason === "XRPL_DELIVERED_AMOUNT_MISMATCH");
+  record.xrplSettlement!.status = "validated";
+  await assert.rejects(executeXrplSettlement({ ...context, loadCase: async () => structuredClone(record) }),
+    (error: XrplError) => error.reason === "SETTLEMENT_ALREADY_COMPLETED");
 });
 
 test("bad configuration and missing approval cannot reach signing", async (t) => {

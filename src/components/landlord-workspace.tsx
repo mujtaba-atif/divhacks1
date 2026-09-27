@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { BellRing, Building2, CalendarClock, CheckCircle2, ChevronRight, CircleHelp, FileImage, FileText, Hammer, LayoutDashboard, LoaderCircle, LogOut, Menu, MessageSquare, ShieldCheck, Upload, UsersRound, Wrench, X } from "lucide-react";
+import { BellRing, Building2, CalendarClock, CheckCircle2, ChevronRight, CircleHelp, FileImage, FileSignature, FileText, Hammer, LayoutDashboard, LoaderCircle, LogOut, Menu, MessageSquare, ShieldCheck, Upload, UsersRound, Wrench, X } from "lucide-react";
 import type { AuthUser, EvidenceRecord, IntegrationStatus, LandlordCase } from "@/lib/types";
 import { BuildingHistoryDialog, BuildingHistorySummary, type BuildingContextState, useCaseBuildingContext } from "./building-history";
 import { messageDeliveryLabel, messageRoleLabel, photonModeLabel } from "./case-panels";
@@ -185,7 +185,7 @@ export default function LandlordWorkspace({ user }: { user: AuthUser }) {
       <a className="brand" href="/" aria-label="RentEscrow NYC home"><span className="brand-mark"><Building2 size={23} /><span /></span><span>RentEscrow<span className="brand-city">NYC</span></span></a>
       <div className="workspace-switch"><div className="workspace-symbol"><Building2 size={18} /></div><div><strong>Property workspace</strong><span>Manager account</span></div><ShieldCheck size={16} /></div>
       <div className="nav-label">WORKSPACE</div>
-      <nav className="main-nav">{landlordTabs.filter(({ id }) => id !== "property").map(({ id, label, icon: Icon }) => <button key={id} className={tab === id ? "active" : ""} onClick={() => navigate(id)}><Icon size={18} /><span>{label}</span>{id === "cases" && <span className="nav-count">{cases.length}</span>}</button>)}</nav>
+      <nav className="main-nav">{landlordTabs.filter(({ id }) => id !== "property").map(({ id, label, icon: Icon }) => <button key={id} className={tab === id ? "active" : ""} onClick={() => navigate(id)}><Icon size={18} /><span>{label}</span>{id === "cases" && <span className="nav-count">{cases.length}</span>}</button>)}<a href="/agreements"><FileSignature size={18} /><span>Agreement</span></a></nav>
       <div className="sidebar-divider" />
       <div className="nav-label">PROPERTIES</div>
       <nav className="main-nav"><button className={tab === "property" ? "active" : ""} onClick={() => navigate("property")}><Building2 size={18} /><span>{activeCase?.property.address ?? "123 Example Street"}</span></button></nav>

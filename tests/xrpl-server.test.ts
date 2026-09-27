@@ -5,7 +5,7 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { Db, MongoClient } from "mongodb";
 import { Client, Wallet, decode, hashes, type Payment } from "xrpl";
-import { makeXrplIntent } from "../src/lib/policy";
+import { evaluateXrplPolicy, makeXrplIntent } from "../src/lib/policy";
 import { addUploadedEvidence, performCaseAction } from "../src/lib/server/cases";
 import { ApiError } from "../src/lib/server/errors";
 import { createSession, mutateSession, readSession, resetSession } from "../src/lib/server/store";
@@ -180,7 +180,7 @@ test("durable journal blocks mutation and reset when a session checkpoint is los
   const intent = makeXrplIntent(setup.enabled);
   const pending = {
     hash: "A".repeat(64), sequence: 123, lastLedgerSequence: 1020,
-    preparedLedgerIndex: 1000, intent,
+    preparedLedgerIndex: 1000, intent, policyDecision: evaluateXrplPolicy(setup.enabled, intent, setup.ownerId),
   };
   await assert.rejects(mutateSession(setup.ownerId, async (document) => {
     await recordXrplPending(document.cases[0].xrplSettlement!, pending);
@@ -194,10 +194,17 @@ test("durable journal blocks mutation and reset when a session checkpoint is los
   await assert.rejects(resetSession(setup.ownerId),
     (error: unknown) => error instanceof ApiError && error.code === "SETTLEMENT_PENDING");
 
+  const validatedAt = new Date().toISOString();
   const receipt = {
     hash: pending.hash, ledgerIndex: 1001, result: "tesSUCCESS" as const, validated: true as const,
     amountDrops: settlement.amountDrops, destination: settlement.destination, source: settlement.source,
-    caseId: settlement.caseId, settlementId: settlement.id, validatedAt: new Date().toISOString(),
+    caseId: settlement.caseId, settlementId: settlement.id, validatedAt,
+    ...(pending.intent.agentId ? {
+      agentId: pending.intent.agentId, policyVersion: pending.intent.policyVersion,
+      requestedAction: pending.intent.requestedAction, asset: pending.intent.asset, amount: pending.intent.amount,
+      issuer: pending.intent.issuer, currency: pending.intent.currency, transactionHash: pending.hash,
+      validatedResult: "tesSUCCESS", timestamp: validatedAt, policyDecision: pending.policyDecision,
+    } : {}),
   };
   await recordXrplValidated(settlement, pending, receipt);
   await assert.rejects(resetSession(setup.ownerId),
