@@ -500,6 +500,12 @@ export interface CaseRecord {
   repairReported: boolean;
   messagingEvents?: CaseMessagingEvent[];
   maintenanceSchedule?: MaintenanceSchedule;
+  pendingMaintenanceRequest?: {
+    scheduledFor?: string;
+    previousScheduledFor?: string;
+    messageId: string;
+    createdAt: string;
+  };
   tenantConfirmed: boolean;
   /** Omitted for pre-registration demo cases; bilateral is the legacy behavior. */
   case_type?: CaseType;

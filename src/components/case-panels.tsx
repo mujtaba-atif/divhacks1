@@ -9,7 +9,7 @@ import { evaluateXrplPolicy, makeXrplIntent } from "@/lib/policy";
 import { formatSettlementAsset, SETTLEMENT_AGENT_ID, SETTLEMENT_POLICY_VERSION } from "@/lib/xrpl-assets";
 import { Button, CheckRow, EmptyState, fullDate, money, SectionHeading, shortDate, time } from "./workspace-ui";
 
-export type WorkspaceTab = "overview" | "evidence" | "messages" | "finances" | "escrow";
+export type WorkspaceTab = "overview" | "evidence" | "messages" | "finances" | "escrow" | "activity";
 export type RunAction = (action: CaseAction) => Promise<CaseRecord | null>;
 
 interface CommonProps {
@@ -108,6 +108,42 @@ export function ActivityTimeline({ record, limit }: { record: CaseRecord; limit?
   return <ol className="activity-timeline">{events.map((event) => { const Icon = timelineIcon(event.kind); return <li key={event.id}><span className={`timeline-icon timeline-${event.kind}`}><Icon size={15} /></span><div className="timeline-copy"><div><strong>{event.title}</strong><time dateTime={event.createdAt}>{shortDate(event.createdAt)}</time></div><p>{event.detail}</p><span className="timeline-time">{time(event.createdAt)}</span></div></li>; })}</ol>;
 }
 
+type ActivityFilter = "all" | "evidence" | "messages" | "finances" | "system";
+
+const financialTimelineTitles = new Set([
+  "Expense recorded",
+  "Financial context refreshed",
+  "Financial context unavailable",
+  "Issue cost confirmed",
+  "Transaction dismissed",
+]);
+
+function isFinancialTimelineEvent(event: CaseRecord["timeline"][number]) {
+  return event.kind === "escrow" || (event.kind === "case" && financialTimelineTitles.has(event.title));
+}
+
+export function ActivityPanel({ record, onUpload }: { record: CaseRecord; onUpload: () => void }) {
+  const [filter, setFilter] = useState<ActivityFilter>("all");
+  const events = [...record.timeline]
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .filter((event) => filter === "all"
+      || (filter === "evidence" && event.kind === "evidence")
+      || (filter === "messages" && event.kind === "message")
+      || (filter === "finances" && isFinancialTimelineEvent(event))
+      || (filter === "system" && ((event.kind === "case" && !isFinancialTimelineEvent(event)) || event.kind === "verification")));
+  const evidenceCount = record.timeline.filter((event) => event.kind === "evidence").length;
+  const financialCount = record.timeline.filter(isFinancialTimelineEvent).length;
+
+  return <section className="tab-content tenant-activity">
+    <div className="tenant-activity-heading"><div><h2>Case activity</h2><p>Review recorded case events, including evidence uploads, messages, financial steps, and system events.</p></div><a className="button button-secondary" href={`/api/cases/${encodeURIComponent(record.id)}/export`} download><ArrowDownLeft size={15} />Export audit log</a></div>
+    <div className="tenant-activity-controls"><div className="segmented-control" aria-label="Filter case activity">{(["all", "evidence", "messages", "finances", "system"] as const).map((value) => <button key={value} aria-pressed={filter === value} className={filter === value ? "selected" : ""} onClick={() => setFilter(value)}>{value[0].toUpperCase() + value.slice(1)}</button>)}</div><span><ShieldCheck size={15} />Recorded activity</span></div>
+    <div className="tenant-activity-layout">
+      <section className="tenant-activity-stream" aria-labelledby="activity-stream-title"><div className="tenant-activity-stream-head"><h3 id="activity-stream-title">Activity stream</h3><span>{events.length} {events.length === 1 ? "event" : "events"} recorded</span></div>{events.length ? <ol className="activity-timeline">{events.map((event) => { const Icon = timelineIcon(event.kind); return <li key={event.id}><span className={`timeline-icon timeline-${event.kind}`}><Icon size={15} /></span><div className="timeline-copy"><div><strong>{event.title}</strong><time dateTime={event.createdAt}>{shortDate(event.createdAt)}</time></div><p>{event.detail}</p><span className="timeline-time">{time(event.createdAt)}</span></div></li>; })}</ol> : <div className="tenant-activity-empty"><span><RefreshCw size={24} /></span><h3>No activity yet</h3><p>Recorded events in this category will appear here as your case progresses.</p><div><Button variant="primary" onClick={onUpload}>Upload evidence</Button></div></div>}</section>
+      <aside className="tenant-audit-sidebar"><section><h3>Audit summary</h3><dl><div><dt>Total recorded events</dt><dd>{record.timeline.length}</dd></div><div><dt>Evidence changes</dt><dd>{evidenceCount}</dd></div><div><dt>Financial actions</dt><dd>{financialCount}</dd></div></dl><div className="tenant-audit-intact"><ShieldCheck size={17} /><div><strong>Saved case history</strong><span>Events shown from the case record</span></div></div></section><section className="tenant-permanent-record"><h3><LockKeyhole size={16} />Case record</h3><p>Actions are timestamped and retained so you can show what happened, when it happened, and who made each change.</p></section></aside>
+    </div>
+  </section>;
+}
+
 export function OverviewPanel({ record, pending, onAction, onTab, onUpload, onPreview, onActivity, onBuilding, buildingContext }: CommonProps & { onTab: (tab: WorkspaceTab) => void; onUpload: () => void; onPreview: (item: EvidenceRecord) => void; onActivity: () => void; onBuilding: () => void; buildingContext: BuildingContextState }) {
   const contractGoverned = Boolean(record.contractId && record.contractSnapshot?.status === "active");
   const before = record.evidence.find((item) => item.stage === "before");
@@ -119,7 +155,7 @@ export function OverviewPanel({ record, pending, onAction, onTab, onUpload, onPr
     && (message.delivery === "demo" || message.delivery === "sent"));
   const isResolved = record.status === "resolved";
   const funded = record.escrow.status !== "unfunded";
-  const phase = isResolved ? 4 : record.verification?.verified ? 3 : record.repairReported ? 2 : notified ? 1 : 0;
+  const phase = isResolved ? 5 : record.tenantConfirmed || record.verification?.verified ? 4 : funded ? 3 : notified ? 2 : before ? 1 : 0;
   const totalExpenses = record.expenses.reduce((sum, expense) => sum + expense.amountCents, 0);
   let nextTitle = "Document the issue";
   let nextDetail = "Add a photo or document to your case.";
@@ -137,8 +173,8 @@ export function OverviewPanel({ record, pending, onAction, onTab, onUpload, onPr
   return <div className="overview-layout">
     <div className="overview-main">
       <section className="progress-section">
-        <SectionHeading title="Case progress"><span className="muted small">{phase + (phase < 4 ? 1 : 0)} of 4 stages</span></SectionHeading>
-        <ol className="progress-track">{[{ name: "Documented", icon: FileText }, { name: "Landlord notified", icon: MessageSquare }, { name: "Repair reviewed", icon: Wrench }, { name: "Resolved", icon: ShieldCheck }].map(({ name, icon: Icon }, index) => <li key={name} className={index < phase ? "complete" : index === phase ? "active" : ""}><span className="progress-step">{index < phase ? <Check size={17} /> : <Icon size={17} />}</span><span>{name}</span></li>)}</ol>
+        <SectionHeading title="Case progress"><span className="muted small">{Math.min(phase + 1, 5)} of 5 stages</span></SectionHeading>
+        <ol className="progress-track">{[{ name: "Case started", icon: FileText }, { name: "Evidence added", icon: FileImage }, { name: "Notice prepared", icon: MessageSquare }, { name: "Rent protected", icon: LockKeyhole }, { name: "Resolution", icon: ShieldCheck }].map(({ name, icon: Icon }, index) => <li key={name} className={index < phase ? "complete" : index === phase ? "active" : ""}><span className="progress-step">{index < phase ? <Check size={17} /> : <Icon size={17} />}</span><span>{name}</span></li>)}</ol>
         <div className={`next-step ${isResolved ? "next-step-complete" : ""}`}><span className="next-step-icon">{isResolved ? <BadgeCheck size={22} /> : <ArrowRight size={22} />}</span><div><span className="eyebrow">{isResolved ? "CASE COMPLETE" : "UP NEXT"}</span><h3>{nextTitle}</h3><p>{nextDetail}</p></div><Button variant="secondary" icon={ArrowRight} onClick={runNext} disabled={!!pending}>{nextAction}</Button></div>
       </section>
 
@@ -177,6 +213,25 @@ export function EvidencePanel({ record, pending, onAction, onUpload, onPreview, 
     {items.length ? <div className="evidence-grid">{items.map((item) => <article className="evidence-card" key={item.id}><button className="evidence-card-image image-preview-button" onClick={() => onPreview(item)} aria-label={`Preview ${item.name}`}><EvidenceImage item={item} /><span className={`image-label ${item.stage === "after" ? "image-label-green" : ""}`}>{item.stage === "before" ? "Before repair" : item.stage === "after" ? "After repair" : item.stage === "receipt" ? "Receipt" : "Document"}</span>{item.isDemo && <span className="sample-image-label">Sample</span>}</button><div className="evidence-card-body"><div className="evidence-card-title"><h3>{item.name}</h3><span>{shortDate(item.createdAt)}</span></div><p className="evidence-note">{item.note || "No additional notes."}</p>{item.temperatureF !== undefined && <span className="temperature-tag"><Thermometer size={14} />{item.temperatureF}°F {item.isDemo ? "sample reading" : "tenant-reported"}</span>}<AnalysisResult item={item} /><AnalysisError item={item} /><div className="evidence-card-footer"><span className="file-format">{item.mimeType.split("/")[1]?.toUpperCase() || "FILE"}</span><Button variant="ghost" icon={item.analysisError ? RefreshCw : ScanLine} busy={pending === "analyze_evidence" && !item.analysis} onClick={() => { void onAction({ action: "analyze_evidence", evidenceId: item.id }); }} disabled={!!pending || resolved || (!!item.analysis && (item.isDemo || !!item.analysis.requiresHumanConfirmation))}>{item.analysis && (item.isDemo || item.analysis.requiresHumanConfirmation) ? "Analyzed" : item.analysisError ? "Retry AI analysis" : "Analyze evidence"}</Button></div></div></article>)}</div> : <EmptyState icon={FileImage} title="No evidence in this view" action={!resolved ? <Button icon={Upload} onClick={onUpload}>Upload evidence</Button> : undefined}>Photos, documents, and receipts will appear here.</EmptyState>}
     {!resolved && <div className="demo-action-strip"><span className="demo-strip-icon"><FlaskConical size={19} /></span><div><strong>Sample evidence</strong><p>Before: 54°F indoor reading. After: 72°F after repair.</p></div><div className="demo-strip-buttons"><Button icon={ImagePlus} onClick={() => { void onAction({ action: "add_demo_evidence", stage: "before" }); }} disabled={!!pending}>Add before photo</Button><Button icon={ImagePlus} onClick={() => { void onAction({ action: "add_demo_evidence", stage: "after" }); }} disabled={!!pending}>Add after photo</Button></div></div>}
     {record.evidence.some((item) => item.stage === "after") && <div className="verification-strip"><ShieldCheck size={22} /><div><span className="eyebrow">APPLICATION CHECK</span><h3>{record.verification?.verified ? "Repair verification passed" : "Repair verification"}</h3><p>{comparison && hasTemperatureComparison ? `${beforeTemperature}°F before → ${afterTemperature}°F after. The application comparison ${comparison.passed ? "passed" : "requires more review"}.` : record.issue === "heating" ? "The application compares detected before and after temperatures when both readings are available." : "This issue requires manual review; AI observations can support the case record."}</p><p className="muted small">Tenant confirmation is required before settlement eligibility. AI analysis is not a legal finding and cannot authorize payment.</p></div><Button variant="primary" icon={ScanLine} busy={pending === "verify_repair"} disabled={!!pending || !record.repairReported || !Boolean(latestAfterEvidence(record)?.analysis) || resolved} onClick={() => { void onAction({ action: "verify_repair" }); }}>Verify repair</Button>{!record.repairReported ? <span className="full-row muted small">A completed repair must be reported before verification.</span> : !Boolean(latestAfterEvidence(record)?.analysis) ? <span className="full-row muted small">Analyze the after-repair evidence to continue.</span> : null}</div>}
+  </section>;
+}
+
+export function EvidenceReviewPanel({ item, onBack, onUpload }: { item: EvidenceRecord; onBack: () => void; onUpload: () => void }) {
+  const analysis = item.analysis;
+  return <section className="tab-content tenant-evidence-review">
+    <button type="button" className="tenant-review-back" onClick={onBack}>← Evidence library</button>
+    <div className="tenant-review-layout">
+      <section className="tenant-review-canvas">
+        <header><div><h2>{item.name}</h2><p>{item.note || "Case evidence item"}</p></div><div>{evidenceSource(item) && <a className="button button-secondary" href={evidenceSource(item)} download={item.name}><ArrowDownLeft size={15} />Download</a>}<Button icon={Upload} onClick={onUpload}>Add evidence</Button></div></header>
+        <div className="tenant-review-image"><EvidenceImage item={item} /></div>
+        <footer><span>1 item selected</span><div><button disabled>← Previous</button><button disabled>Next →</button></div></footer>
+      </section>
+      <aside className="tenant-review-sidebar">
+        <section><div><h3>Evidence review</h3><span>{analysis ? "Analysis available" : "Awaiting analysis"}</span></div><dl><div><dt>AI confidence</dt><dd>{analysis?.confidence === undefined ? "–" : `${Math.round(analysis.confidence * 100)}%`}</dd></div></dl><p><Check size={13} />Upload timestamp recorded</p><p><Check size={13} />File type recorded</p>{analysis?.temperatureF !== undefined && <p><Check size={13} />Temperature reading detected</p>}<p><ShieldX size={13} />Location not provided</p><p><ShieldX size={13} />File integrity not independently verified</p></section>
+        <section><h3>FILE DETAILS</h3><dl><div><dt>Added</dt><dd>{shortDate(item.createdAt)}</dd></div><div><dt>Type</dt><dd>{item.mimeType.split("/").at(-1)?.toUpperCase()}</dd></div><div><dt>Added by</dt><dd>{item.uploadedByRole === "landlord" ? "Landlord" : "Tenant"}</dd></div></dl></section>
+        <section><h3>DESCRIPTION</h3><p>{item.note || analysis?.summary || "No description added."}</p></section>
+      </aside>
+    </div>
   </section>;
 }
 

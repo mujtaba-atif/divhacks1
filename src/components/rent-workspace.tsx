@@ -1,19 +1,24 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { ArrowDownToLine, Building2, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, FileImage, FileSignature, FileText, FlaskConical, LayoutDashboard, LoaderCircle, LockKeyhole, LogOut, Menu, MessageSquare, Plus, PlugZap, RefreshCw, ShieldCheck, Upload, Wallet, X } from "lucide-react";
+import Image from "next/image";
+import { ArrowDownToLine, Bell, Building2, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, FileImage, FilePenLine, FileText, FlaskConical, LayoutDashboard, LoaderCircle, LockKeyhole, LogOut, Menu, MessageSquare, Plus, PlugZap, RefreshCw, ShieldCheck, Upload, Wallet, X } from "lucide-react";
 import type { AuthUser, CaseAction, CaseRecord, DashboardData, EvidenceRecord, EvidenceStage, PolicyResult } from "@/lib/types";
-import { ActivityTimeline, canRelease, canReviewXrplSettlement, EscrowPanel, EvidencePanel, evidenceSource, findOutboundMessage, MessagesPanel, OverviewPanel, type WorkspaceTab } from "./case-panels";
+import { ActivityPanel, ActivityTimeline, canRelease, canReviewXrplSettlement, EscrowPanel, EvidencePanel, EvidenceReviewPanel, findOutboundMessage, MessagesPanel, OverviewPanel, type WorkspaceTab } from "./case-panels";
 import { BuildingHistoryDialog, useCaseBuildingContext } from "./building-history";
 import { FinancesPanel } from "./finances-panel";
 import { NewCaseDialog, type NewCaseInput } from "./new-case-dialog";
-import { Button, EmptyState, fullDate, Modal, money, StatusBadge } from "./workspace-ui";
+import { TenantCasesDashboard } from "./tenant-cases-dashboard";
+import { TenantEmptyWorkspace } from "./tenant-empty-workspace";
+import { TenantContracts } from "./tenant-contracts";
+import { Button, EmptyState, Modal, money, StatusBadge } from "./workspace-ui";
 import { announceSessionChange, redirectIfSignedOut, useSessionGuard } from "./use-session-guard";
 import { formatSettlementAsset, SETTLEMENT_AGENT_ID, SETTLEMENT_POLICY_VERSION } from "@/lib/xrpl-assets";
+import "./tenant-design.css";
 
 type ModalName = "new-case" | "upload" | "expense" | "building" | "integrations" | "reset" | "release" | "xrpl-settle" | "xrpl-agent" | "activity" | null;
 type Toast = { message: string; tone: "success" | "info" } | null;
-const tabs: { id: WorkspaceTab; label: string; icon: typeof LayoutDashboard }[] = [{ id: "overview", label: "Overview", icon: LayoutDashboard }, { id: "evidence", label: "Evidence", icon: FileImage }, { id: "messages", label: "Messages", icon: MessageSquare }, { id: "finances", label: "Finances", icon: Wallet }, { id: "escrow", label: "Escrow", icon: LockKeyhole }];
+const tabs: { id: WorkspaceTab; label: string; icon: typeof LayoutDashboard }[] = [{ id: "overview", label: "Overview", icon: LayoutDashboard }, { id: "evidence", label: "Evidence", icon: FileImage }, { id: "messages", label: "Messages", icon: MessageSquare }, { id: "finances", label: "Finances", icon: Wallet }, { id: "escrow", label: "Escrow", icon: LockKeyhole }, { id: "activity", label: "Activity", icon: RefreshCw }];
 
 class RequestError extends Error {
   constructor(message: string, readonly code?: string, readonly record?: CaseRecord, readonly policy?: PolicyResult) { super(message); }
@@ -76,11 +81,14 @@ function caseCreationMessage(record: CaseRecord): Toast {
   return { message: "Your case is open. The Tenant Agent repair request has an unconfirmed delivery state. Review Messages before retrying.", tone: "info" };
 }
 
-export default function RentWorkspace({ user }: { user: AuthUser }) {
+export default function RentWorkspace({ user, initialView = "cases" }: { user: AuthUser; initialView?: "cases" | "contracts" }) {
   useSessionGuard(user);
   const [data, setData] = useState<DashboardData | null>(null);
   const [activeId, setActiveId] = useState("");
   const [tab, setTab] = useState<WorkspaceTab>("overview");
+  const [workspaceView, setWorkspaceView] = useState<"cases" | "case" | "contracts">(initialView);
+  const casesDashboard = workspaceView === "cases";
+  const contractsOpen = workspaceView === "contracts";
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -102,16 +110,42 @@ export default function RentWorkspace({ user }: { user: AuthUser }) {
       setError(null);
       const result = await request<DashboardData>("/api/dashboard");
       setData(result);
-      setActiveId((id) => { const requested = new URLSearchParams(window.location.search).get("case"); return result.cases.some((item) => item.id === id) ? id : requested && result.cases.some((item) => item.id === requested) ? requested : result.cases[0]?.id || ""; });
-      const requestedTab = new URLSearchParams(window.location.search).get("tab");
-      if (requestedTab && tabs.some((item) => item.id === requestedTab)) setTab(requestedTab as WorkspaceTab);
+      const params = new URLSearchParams(window.location.search);
+      const requestedCase = params.get("case");
+      const requestedTab = params.get("tab");
+      const validCase = requestedCase && result.cases.some((item) => item.id === requestedCase) ? requestedCase : result.cases[0]?.id || "";
+      const validTab = requestedTab && tabs.some((item) => item.id === requestedTab) ? requestedTab as WorkspaceTab : "overview";
+      setActiveId(validCase);
+      setWorkspaceView(params.get("view") === "contracts" ? "contracts" : !requestedCase && !requestedTab ? "cases" : "case");
+      setTab(validTab);
+      setPreview(null);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "The workspace could not load."); }
     finally { setLoading(false); }
   }, []);
 
   useEffect(() => { void loadDashboard(); }, [loadDashboard]);
   useEffect(() => {
-    if (pending) return;
+    const restoreWorkspaceLocation = () => {
+      const params = new URLSearchParams(window.location.search);
+      const requestedCase = params.get("case");
+      const requestedTab = params.get("tab");
+      const validCase = requestedCase && data?.cases.some((item) => item.id === requestedCase) ? requestedCase : data?.cases[0]?.id || "";
+      const validTab = requestedTab && tabs.some((item) => item.id === requestedTab) ? requestedTab as WorkspaceTab : "overview";
+      setActiveId(validCase);
+      setTab(validTab);
+      setWorkspaceView(params.get("view") === "contracts" ? "contracts" : !requestedCase && !requestedTab ? "cases" : "case");
+      setPreview(null);
+      setPolicy(null);
+      setFinancialPolicy(null);
+      setError(null);
+      setModal(null);
+      setMobileNav(false);
+    };
+    window.addEventListener("popstate", restoreWorkspaceLocation);
+    return () => window.removeEventListener("popstate", restoreWorkspaceLocation);
+  }, [data]);
+  useEffect(() => {
+    if (pending || contractsOpen) return;
     let cancelled = false;
     let refreshing = false;
     async function refreshDashboard() {
@@ -129,7 +163,7 @@ export default function RentWorkspace({ user }: { user: AuthUser }) {
     const onVisibilityChange = () => { void refreshDashboard(); };
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => { cancelled = true; window.clearInterval(interval); document.removeEventListener("visibilitychange", onVisibilityChange); };
-  }, [tab, pending]);
+  }, [tab, pending, contractsOpen]);
   useEffect(() => { if (!toast) return; const timeout = window.setTimeout(() => setToast(null), 6500); return () => window.clearTimeout(timeout); }, [toast]);
   useEffect(() => { if (!mobileNav) return; const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setMobileNav(false); }; window.addEventListener("keydown", escape); return () => window.removeEventListener("keydown", escape); }, [mobileNav]);
 
@@ -165,7 +199,7 @@ export default function RentWorkspace({ user }: { user: AuthUser }) {
     try {
       const result = await request<{ case: CaseRecord }>("/api/cases", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
       setData((current) => current ? { ...current, cases: [...current.cases, result.case] } : current);
-      setActiveId(result.case.id); setTab("overview"); setPolicy(null); setFinancialPolicy(null); setToast(caseCreationMessage(result.case));
+      openCase(result.case); setToast(caseCreationMessage(result.case));
       return true;
     } catch (cause) { setError(cause instanceof Error ? cause.message : "The case could not be created."); return false; }
     finally { mutationBusy.current = false; setPending(null); }
@@ -178,7 +212,7 @@ export default function RentWorkspace({ user }: { user: AuthUser }) {
       const result = await request<{ case: CaseRecord }>(`/api/cases/${encodeURIComponent(record.id)}/evidence`, { method: "POST", body: form });
       const previousIds = new Set(record.evidence.map((item) => item.id));
       const uploaded = result.case.evidence.find((item) => !previousIds.has(item.id)) ?? result.case.evidence.at(-1);
-      updateRecord(result.case); setPolicy(null); setFinancialPolicy(null); setModal(null); setTab("evidence");
+      updateRecord(result.case); setPolicy(null); setFinancialPolicy(null); setModal(null); navigate("evidence");
       setToast(uploaded?.analysisError
         ? { message: "Evidence uploaded and saved. AI analysis needs attention; retry from the evidence card.", tone: "info" }
         : uploaded?.analysis?.source === "gemini"
@@ -194,7 +228,7 @@ export default function RentWorkspace({ user }: { user: AuthUser }) {
     mutationBusy.current = true; mutationVersion.current += 1; setPending("reset"); setError(null);
     try {
       const result = await request<DashboardData>("/api/demo/reset", { method: "POST" });
-      setData(result); setActiveId(result.cases[0]?.id || ""); setTab("overview"); setModal(null); setPolicy(null); setFinancialPolicy(null); setToast({ message: "The demo workspace has been reset to its sample case.", tone: "success" });
+      setData(result); setActiveId(result.cases[0]?.id || ""); showCases(); setModal(null); setPolicy(null); setFinancialPolicy(null); setToast({ message: "The demo workspace has been reset to its sample case.", tone: "success" });
     } catch (cause) { setError(cause instanceof Error ? cause.message : "The demo could not be reset."); }
     finally { mutationBusy.current = false; setPending(null); }
   }
@@ -213,39 +247,76 @@ export default function RentWorkspace({ user }: { user: AuthUser }) {
     }
   }
 
-  function navigate(next: WorkspaceTab) { setTab(next); setMobileNav(false); }
+  function pushWorkspaceLocation(next: { dashboard?: boolean; contracts?: boolean; caseId?: string; tab?: WorkspaceTab }) {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("case");
+    url.searchParams.delete("tab");
+    url.searchParams.delete("view");
+    if (next.contracts) url.searchParams.set("view", "contracts");
+    else if (!next.dashboard) {
+      if (next.caseId) url.searchParams.set("case", next.caseId);
+      url.searchParams.set("tab", next.tab || "overview");
+    }
+    const nextLocation = `${url.pathname}${url.search}${url.hash}`;
+    const currentLocation = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (nextLocation !== currentLocation) window.history.pushState(null, "", nextLocation);
+  }
+
+  function navigate(next: WorkspaceTab) {
+    pushWorkspaceLocation({ caseId: record?.id, tab: next });
+    setTab(next); setWorkspaceView("case"); setPreview(null); setMobileNav(false);
+  }
+  function showCases() {
+    pushWorkspaceLocation({ dashboard: true });
+    setWorkspaceView("cases"); setPreview(null); setMobileNav(false);
+  }
+  function showContracts() {
+    pushWorkspaceLocation({ contracts: true });
+    setWorkspaceView("contracts"); setPreview(null); setMobileNav(false); setModal(null);
+  }
+  function openCase(next: CaseRecord) {
+    pushWorkspaceLocation({ caseId: next.id, tab: "overview" });
+    setActiveId(next.id); setTab("overview"); setWorkspaceView("case"); setPreview(null); setPolicy(null); setFinancialPolicy(null); setError(null);
+  }
+  function reviewEvidence(item: EvidenceRecord, openEvidenceTab = false) {
+    if (openEvidenceTab) navigate("evidence");
+    setPreview(item);
+  }
   function openModal(next: ModalName) { setError(null); setModal(next); setMobileNav(false); }
   function closeModal() { if (!mutationBusy.current) { setModal(null); setError(null); } }
 
-  return <div className="workspace-shell">
+  return <div className={`workspace-shell tenant-design${contractsOpen ? " tenant-contracts-active" : ""}`}>
     <a href="#main-content" className="skip-link">Skip to case content</a>
     {mobileNav && <button className="nav-backdrop" aria-label="Close navigation" onClick={() => setMobileNav(false)} />}
     <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`} aria-label="Workspace navigation">
-      <a className="brand" href="/" aria-label="RentEscrow NYC home"><span className="brand-mark"><Building2 size={23} /><span /></span><span>RentEscrow<span className="brand-city">NYC</span></span></a>
-      <div className="workspace-switch"><div className="workspace-symbol"><Building2 size={18} /></div><div><strong>My workspace</strong><span>Personal tenant account</span></div><ShieldCheck size={16} /></div>
-      <div className="nav-label">WORKSPACE</div>
-      <nav className="main-nav"><button className={tab === "overview" ? "active" : ""} onClick={() => navigate("overview")}><LayoutDashboard size={18} /><span>My cases</span><span className="nav-count">{data?.cases.length || 1}</span></button><a href="/agreements"><FileSignature size={18} /><span>Agreement</span></a><button className={tab === "evidence" ? "active" : ""} onClick={() => navigate("evidence")}><FileImage size={18} /><span>Evidence</span></button><button className={tab === "messages" ? "active" : ""} onClick={() => navigate("messages")}><MessageSquare size={18} /><span>Messages</span></button><button className={tab === "finances" ? "active" : ""} onClick={() => navigate("finances")}><Wallet size={18} /><span>Finances</span></button><button className={tab === "escrow" ? "active" : ""} onClick={() => navigate("escrow")}><LockKeyhole size={18} /><span>Rent escrow</span></button></nav>
-      <div className="sidebar-divider" />
-      <div className="nav-label">YOUR HOME</div>
-      <button className="home-context" onClick={() => openModal("building")} disabled={!record}><Building2 size={18} /><div><strong>{record?.building.address || "Your building"}</strong><span>{record ? `${record.building.borough} · Apt ${record.apartment}` : "NYC housing records"}</span></div><ChevronRight size={15} /></button>
-      <Button className="new-case-button" icon={Plus} onClick={() => openModal("new-case")} disabled={!data}>New case</Button>
-      <div className="sidebar-bottom"><button className="sidebar-utility" onClick={() => openModal("integrations")} disabled={!data}><PlugZap size={17} /><span>Connections</span><span className="green-dot" /></button><button className="sidebar-utility" onClick={() => openModal("reset")} disabled={!data || !!pending}><RefreshCw size={16} /><span>Reset demo</span></button><div className="demo-mode-note"><FlaskConical size={16} /><div><strong>Demo workspace</strong><p>Simulated USD with optional Testnet RLUSD or Test XRP settlement.</p></div></div><div className="tenant-profile"><span className="tenant-avatar">{user.displayName.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</span><div><strong>{user.displayName}</strong><span>Tenant · {user.email}</span>{user.maskedPhone && <span>{user.maskedPhone}</span>}</div><button className="icon-button" aria-label="Sign out" title="Sign out" onClick={() => void logout()} disabled={pending === "logout"}>{pending === "logout" ? <LoaderCircle className="spin" size={17} /> : <LogOut size={17} />}</button></div></div>
+      <a className="tenant-brand" href="/" aria-label="RentEscrow home"><Image src="/figma/door.png" alt="" width={40} height={40} sizes="40px" /><span><strong>RentEscrow</strong><small>NYC TENANT PROTECTION</small></span></a>
+      <nav className="main-nav tenant-primary-nav">
+        <button className={casesDashboard ? "active" : ""} onClick={showCases}><LayoutDashboard size={17} /><span>My cases</span></button>
+        <button className={workspaceView === "case" && tab === "messages" ? "active" : ""} onClick={() => navigate("messages")}><MessageSquare size={17} /><span>Messages</span></button>
+        <button className={workspaceView === "case" && tab === "finances" ? "active" : ""} onClick={() => navigate("finances")}><Wallet size={17} /><span>Finances</span></button>
+        <button className={`tenant-contracts-nav${contractsOpen ? " active" : ""}`} aria-current={contractsOpen ? "page" : undefined} onClick={showContracts}><FilePenLine size={18} /><span>Contracts</span>{contractsOpen && <i aria-hidden="true" />}</button>
+      </nav>
+      <div className="sidebar-bottom tenant-sidebar-bottom">
+        <button className="tenant-support" onClick={() => openModal("integrations")} disabled={!data}><CircleHelp size={16} /><span>Tenant support</span></button>
+        <div className="tenant-profile"><span className="tenant-avatar">{user.displayName.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</span><div><strong>Your account</strong><span>{user.displayName}</span></div><button className="icon-button" aria-label="Sign out" title="Sign out" onClick={() => void logout()} disabled={pending === "logout"}>{pending === "logout" ? <LoaderCircle className="spin" size={17} /> : <LogOut size={17} />}</button></div>
+      </div>
     </aside>
 
-    <div className="workspace-body"><header className="topbar"><div className="topbar-left"><button className="icon-button mobile-menu" aria-label="Open workspace navigation" aria-expanded={mobileNav} onClick={() => setMobileNav(true)}><Menu size={21} /></button><a className="mobile-brand" href="/">RentEscrow <span>NYC</span></a><span>Workspace</span><ChevronRight size={14} /><span>My cases</span>{record && <><ChevronRight size={14} /><strong>{record.id}</strong></>}</div><div className="topbar-right"><span className="demo-pill"><span />Demo mode</span><button className="icon-button" title="View connections" aria-label="View integration connections" onClick={() => openModal("integrations")} disabled={!data}><PlugZap size={18} /></button><span className="header-identity"><span>{user.displayName}</span><small>{user.email}</small></span><span className="topbar-avatar">{user.displayName.charAt(0).toUpperCase()}</span><button className="button button-secondary header-logout" onClick={() => void logout()} disabled={pending === "logout"}>{pending === "logout" ? <LoaderCircle className="spin" size={15} /> : <LogOut size={15} />}<span>Sign out</span></button></div></header>
+    <div className="workspace-body"><header className="topbar"><div className="topbar-left"><button className="icon-button mobile-menu" aria-label="Open workspace navigation" aria-expanded={mobileNav} onClick={() => setMobileNav(true)}><Menu size={21} /></button><a className="mobile-brand" href="/">RentEscrow</a>{contractsOpen ? <nav className="tenant-contract-breadcrumb" aria-label="Breadcrumb"><span>Tenant</span><span aria-hidden="true">/</span><strong aria-current="page">Contracts</strong></nav> : <span>{casesDashboard ? "My cases" : "New York City housing"}</span>}</div><div className="topbar-right"><button className="tenant-topbar-link" type="button" onClick={() => openModal("integrations")} disabled={!data}>Help center</button><button className="tenant-topbar-link tenant-notifications" type="button" onClick={() => setToast({ message: "You’re all caught up. Case updates will appear here.", tone: "info" })}><Bell size={14} />Notifications</button></div></header>
       <main id="main-content" className="main-content">
-        {loading ? <div className="workspace-loading" role="status"><LoaderCircle className="spin" size={27} /><h1>Opening your workspace</h1><p>Loading your repair cases and records.</p></div> : !data ? <div className="workspace-loading"><EmptyState icon={CircleHelp} title="Your workspace could not load" action={<Button icon={RefreshCw} onClick={() => { setLoading(true); void loadDashboard(); }}>Try again</Button>}>{error || "Please try again in a moment."}</EmptyState></div> : !record ? <EmptyState icon={FileText} title="No repair cases yet" action={<Button variant="primary" icon={Plus} onClick={() => openModal("new-case")}>Open a case</Button>}>This account has no active cases. Start a new repair case when you are ready.</EmptyState> : <>
-          <div className="case-meta-line"><div><span className="eyebrow">REPAIR CASE</span><span className="case-id">{record.id}</span><StatusBadge status={record.status} /></div><label className="case-switcher"><span className="sr-only">Select case</span><select aria-label="Select case" value={record.id} onChange={(event) => { setActiveId(event.target.value); setPolicy(null); setFinancialPolicy(null); setTab("overview"); setError(null); }} disabled={!!pending}>{data.cases.map((item) => <option value={item.id} key={item.id}>{item.id} · {item.title}</option>)}</select><ChevronDown size={14} /></label></div>
-          <div className="case-header"><div><h1>{record.title}</h1><div className="case-location"><span><Building2 size={15} />{record.building.address}, Apt {record.apartment}</span><span className="location-divider" /><span>Opened {fullDate(record.createdAt)}</span></div></div><div className="case-header-actions"><a className="button button-secondary icon-only-mobile" href={`/api/cases/${encodeURIComponent(record.id)}/export`} download aria-label="Export case dossier" title="Export case dossier"><ArrowDownToLine size={16} /><span>Export case</span></a><Button variant="primary" icon={Plus} onClick={() => openModal("upload")} disabled={!!pending || record.status === "resolved"}>Add evidence</Button></div></div>
-          <div className="case-tabs" role="tablist" aria-label="Case sections">{tabs.map(({ id, label, icon: Icon }) => <button role="tab" id={`tab-${id}`} aria-selected={tab === id} aria-controls={`panel-${id}`} tabIndex={tab === id ? 0 : -1} key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)} onKeyDown={(event) => { const index = tabs.findIndex((item) => item.id === id); let next: number | null = null; if (event.key === "ArrowRight") next = (index + 1) % tabs.length; if (event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length; if (event.key === "Home") next = 0; if (event.key === "End") next = tabs.length - 1; if (next !== null) { event.preventDefault(); setTab(tabs[next].id); document.getElementById(`tab-${tabs[next].id}`)?.focus(); } }}><Icon size={16} />{label}{id === "evidence" && <span>{record.evidence.length}</span>}</button>)}</div>
+        {contractsOpen ? <TenantContracts user={user} /> : loading ? <div className="workspace-loading" role="status"><LoaderCircle className="spin" size={27} /><h1>Opening your workspace</h1><p>Loading your repair cases and records.</p></div> : !data ? <div className="workspace-loading"><EmptyState icon={CircleHelp} title="Your workspace could not load" action={<Button icon={RefreshCw} onClick={() => { setLoading(true); void loadDashboard(); }}>Try again</Button>}>{error || "Please try again in a moment."}</EmptyState></div> : casesDashboard ? <TenantCasesDashboard cases={data.cases} onCreate={() => openModal("new-case")} onOpen={openCase} /> : !record ? <TenantEmptyWorkspace tab={tab} onTab={navigate} onCreate={() => openModal("new-case")} onCases={showCases} /> : <>
+          <div className="tenant-case-breadcrumb"><button type="button" onClick={showCases}>My cases</button><span>/</span><span>{record.title}</span></div>
+          <div className="case-header"><div><div className="tenant-title-row"><h1>{record.title}</h1><StatusBadge status={record.status} /></div><div className="case-location"><span>{record.id}</span><span className="location-divider" /><span>{record.building.address}, Apt {record.apartment}</span></div></div><div className="case-header-actions"><label className="case-switcher"><span className="sr-only">Select case</span><select aria-label="Select case" value={record.id} onChange={(event) => { const nextCase = data.cases.find((item) => item.id === event.target.value); if (nextCase) openCase(nextCase); }} disabled={!!pending}>{data.cases.map((item) => <option value={item.id} key={item.id}>{item.id} · {item.title}</option>)}</select><ChevronDown size={14} /></label><a className="button button-secondary icon-only-mobile" href={`/api/cases/${encodeURIComponent(record.id)}/export`} download aria-label="Export case dossier" title="Export case dossier"><ArrowDownToLine size={16} /><span>Export case</span></a><Button variant="primary" icon={Plus} onClick={() => openModal("new-case")} disabled={!!pending}>New case</Button></div></div>
+          <div className="case-tabs" role="tablist" aria-label="Case sections">{tabs.map(({ id, label, icon: Icon }) => <button role="tab" id={`tab-${id}`} aria-selected={tab === id} aria-controls={`panel-${id}`} tabIndex={tab === id ? 0 : -1} key={id} className={tab === id ? "active" : ""} onClick={() => navigate(id)} onKeyDown={(event) => { const index = tabs.findIndex((item) => item.id === id); let next: number | null = null; if (event.key === "ArrowRight") next = (index + 1) % tabs.length; if (event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length; if (event.key === "Home") next = 0; if (event.key === "End") next = tabs.length - 1; if (next !== null) { event.preventDefault(); navigate(tabs[next].id); document.getElementById(`tab-${tabs[next].id}`)?.focus(); } }}><Icon size={16} />{label}{id === "evidence" && <span>{record.evidence.length}</span>}</button>)}</div>
           {error && !modal && <div className="error-banner" role="alert"><CircleHelp size={18} /><span>{error}</span><button className="icon-button" onClick={() => setError(null)} title="Dismiss error" aria-label="Dismiss error"><X size={16} /></button></div>}
           {record.status === "resolved" && <div className="resolved-banner"><CheckCircle2 size={19} /><div><strong>Repair resolved. Case complete.</strong><span>Your evidence, messages, and settlement receipts remain available for export.</span></div></div>}
           <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} tabIndex={0} className="tab-panel">
-            {tab === "overview" && <OverviewPanel record={record} pending={pending} onAction={runAction} onTab={setTab} onUpload={() => openModal("upload")} onPreview={setPreview} onActivity={() => openModal("activity")} onBuilding={() => openModal("building")} buildingContext={buildingContext} />}
-            {tab === "evidence" && <EvidencePanel record={record} pending={pending} onAction={runAction} onUpload={() => openModal("upload")} onPreview={setPreview} geminiIntegration={geminiIntegration} />}
+            {tab === "overview" && <OverviewPanel record={record} pending={pending} onAction={runAction} onTab={navigate} onUpload={() => openModal("upload")} onPreview={(item) => reviewEvidence(item, true)} onActivity={() => navigate("activity")} onBuilding={() => openModal("building")} buildingContext={buildingContext} />}
+            {tab === "evidence" && (preview ? <EvidenceReviewPanel item={preview} onBack={() => setPreview(null)} onUpload={() => openModal("upload")} /> : <EvidencePanel record={record} pending={pending} onAction={runAction} onUpload={() => openModal("upload")} onPreview={(item) => reviewEvidence(item)} geminiIntegration={geminiIntegration} />)}
             {tab === "messages" && <MessagesPanel record={record} pending={pending} onAction={runAction} integration={data.integrations.find((item) => item.id === "photon")} />}
             {tab === "finances" && <FinancesPanel record={record} pending={pending} onAction={runAction} onExpense={() => openModal("expense")} policy={financialPolicy} nessieConfigured={data.integrations.some((item) => item.id === "nessie" && item.status !== "demo")} />}
             {tab === "escrow" && <EscrowPanel record={record} pending={pending} onAction={runAction} onRelease={() => openModal("release")} onXrplReview={() => openModal("xrpl-settle")} onXrplAgentReview={() => openModal("xrpl-agent")} policy={policy} xrplIntegration={xrplIntegration} />}
+            {tab === "activity" && <ActivityPanel record={record} onUpload={() => openModal("upload")} />}
           </div>
           <footer className="workspace-footer"><span><ShieldCheck size={13} />{record.contractId ? "Your case. Your evidence. Your signed policy." : "Your case. Your evidence. Your approval."}</span><span>{record.building.source === "demo" ? "Sample NYC case" : "NYC repair case"} · Simulated USD{record.xrplSettlement ? " · XRPL Testnet" : ""}</span></footer>
         </>}
@@ -262,11 +333,8 @@ export default function RentWorkspace({ user }: { user: AuthUser }) {
     {modal === "reset" && <Modal title="Reset the demo workspace?" subtitle="This removes cases, uploads, messages, expenses, registered profiles, and contracts in this browser session and restores the sample case." onClose={closeModal}><div className="inline-note note-amber"><FileText size={19} /><p>Export any case records you want to keep before resetting.</p></div>{error && <p className="form-error" role="alert">{error}</p>}<div className="modal-footer"><Button onClick={closeModal} disabled={!!pending}>Keep workspace</Button><Button variant="danger" icon={RefreshCw} busy={pending === "reset"} onClick={() => { void resetDemo(); }}>Reset demo</Button></div></Modal>}
     {modal === "release" && record && <Modal title="Approve simulated rent release" subtitle="The repair review passed and your confirmation is recorded." onClose={closeModal}><div className="release-confirm-amount"><LockKeyhole size={24} /><strong>{money(record.escrow.amountCents)}</strong><span>SIMULATED USD</span></div><dl className="escrow-details"><div><dt>To</dt><dd>{record.landlordName}</dd></div><div><dt>Destination</dt><dd className="mono break-word">{record.escrow.destination}</dd></div><div><dt>Case</dt><dd>{record.id}</dd></div></dl><p className="muted">Approving releases the simulated escrow balance and closes this repair case.</p>{error && <p className="form-error" role="alert">{error}</p>}<div className="modal-footer"><Button onClick={closeModal} disabled={!!pending}>Cancel</Button><Button variant="primary" icon={ShieldCheck} busy={pending === "release_escrow"} disabled={!canRelease(record)} onClick={async () => { const updated = await runAction({ action: "release_escrow" }); if (updated) setModal(null); }}>Approve release</Button></div></Modal>}
     {(modal === "xrpl-settle" || modal === "xrpl-agent") && record?.xrplSettlement && <Modal title={modal === "xrpl-agent" ? "Authorize XRPL settlement agent" : "Review XRPL Testnet settlement"} subtitle="Confirm the exact Testnet asset amount and server-pinned recipient before signing." onClose={closeModal}><div className="release-confirm-amount"><Wallet size={24} /><strong>{formatSettlementAsset(record.xrplSettlement)}</strong><span>XRPL TESTNET · VALUELESS TEST FUNDS</span></div><dl className="escrow-details"><div><dt>Agent ID</dt><dd className="mono break-word">{record.xrplSettlement.agentId || SETTLEMENT_AGENT_ID}</dd></div><div><dt>Policy</dt><dd className="mono break-word">{record.xrplSettlement.policyVersion || SETTLEMENT_POLICY_VERSION}</dd></div><div><dt>Asset</dt><dd>{record.xrplSettlement.asset || "XRP"}</dd></div><div><dt>Recipient</dt><dd className="mono break-word">{record.xrplSettlement.destination}</dd></div><div><dt>Source</dt><dd className="mono break-word">{record.xrplSettlement.source}</dd></div><div><dt>Case / settlement</dt><dd className="mono break-word">{record.id} / {record.xrplSettlement.id}</dd></div><div><dt>Transaction</dt><dd>Payment on XRPL Testnet</dd></div><div><dt>Application amount</dt><dd>{money(record.xrplSettlement.amountUsdCents)} simulated USD</dd></div>{record.xrplSettlement.asset === "RLUSD" && <><div><dt>Currency</dt><dd className="mono break-word">{record.xrplSettlement.currency}</dd></div><div><dt>Issuer</dt><dd className="mono break-word">{record.xrplSettlement.issuer}</dd></div></>}</dl><div className="inline-note note-green"><ShieldCheck size={18} /><p>{modal === "xrpl-agent" ? "Authorize the agent to request this single payment once repair verification and your confirmation pass. If both already passed, it runs now. The agent cannot change the recipient, asset, issuer, currency, amount, network, or signing credentials. " : ""}The server rebuilds and rechecks the final payment immediately before server-side signing, then waits for a validated ledger result and matching delivered amount. Validation is required before the case is settled.</p></div>{error && <p className="form-error" role="alert">{error}</p>}<div className="modal-footer"><Button onClick={closeModal} disabled={!!pending}>Cancel</Button><Button variant="primary" icon={ShieldCheck} busy={pending === "settle_xrpl" || pending === "authorize_xrpl_agent"} disabled={!!pending || xrplIntegration?.status !== "configured" || (modal === "xrpl-agent" ? record.xrplSettlement.status !== "ready" || !!record.xrplSettlement.hash || !!record.xrplSettlement.agentAuthorizedAt : !canReviewXrplSettlement(record))} onClick={async () => { const updated = await runAction({ action: modal === "xrpl-agent" ? "authorize_xrpl_agent" : "settle_xrpl" }); if (updated) setModal(null); }}>{modal === "xrpl-agent" ? "Authorize agent settlement" : "Approve Testnet payment"}</Button></div></Modal>}
-    {preview && <Modal title={preview.name} subtitle={`${preview.isDemo ? "Sample evidence" : "Uploaded evidence"} · ${fullDate(preview.createdAt)}`} onClose={() => setPreview(null)} wide>{preview.mimeType.startsWith("image/") && evidenceSource(preview) ? <img className="evidence-full-preview" src={evidenceSource(preview)} alt={preview.name} /> : preview.dataUrl ? <a href={preview.dataUrl} download={preview.name} className="button button-secondary"><ArrowDownToLine size={17} />Download document</a> : <p className="muted">A preview is not available for this document.</p>}{preview.note && <p className="preview-note">{preview.note}</p>}{preview.analysis && <div className="inline-note note-green"><ScanResult /><div><strong>{preview.analysis.source === "demo" ? "Sample analysis" : "Gemini AI analysis"}</strong><p>{preview.analysis.source === "gemini" ? `AI summary: ${preview.analysis.summary}` : preview.analysis.summary}</p>{preview.analysis.observations?.length ? <p><strong>Detected observations:</strong> {preview.analysis.observations.join("; ")}</p> : null}{preview.analysis.source === "gemini" && <p className="muted small">{[preview.analysis.temperatureF === undefined ? null : `${preview.analysis.temperatureF}°F detected`, preview.analysis.confidence === undefined ? null : `${Math.round(preview.analysis.confidence * 100)}% confidence`, preview.analysis.model].filter(Boolean).join(" · ")}. Requires confirmation; this is not a legal finding.</p>}</div></div>}{preview.analysisError && <div className="inline-note note-amber" role="alert"><CircleHelp size={18} /><div><strong>AI analysis needs attention</strong><p>{preview.analysisError.message} Close this preview and retry from the evidence card.</p></div></div>}</Modal>}
   </div>;
 }
-
-function ScanResult() { return <ShieldCheck size={20} />; }
 
 function UploadDialog({ record, onClose, onUpload, pending, error, geminiConfigured }: { record: CaseRecord; onClose: () => void; onUpload: (data: FormData) => Promise<boolean>; pending: boolean; error: string | null; geminiConfigured: boolean }) {
   const [file, setFile] = useState<File | null>(null);

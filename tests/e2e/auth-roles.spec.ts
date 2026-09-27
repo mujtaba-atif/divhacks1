@@ -38,11 +38,12 @@ test("login routes the property manager to a responsive landlord workspace", asy
   try {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto("/login");
+    await page.getByRole("radio", { name: "Landlord", exact: true }).check();
     await page.locator("#login-email").fill(demoUsers.landlord.email);
     await page.locator("#login-password").fill(demoUsers.landlord.password);
     await page.locator("button[type=submit]").click();
     await expect(page).toHaveURL(/\/landlord$/);
-    await expect(page.getByRole("navigation").first()).toContainText("Open cases");
+    await expect(page.getByRole("navigation", { name: "Landlord workspace" })).toContainText("Repair Cases");
     await expect(page.getByText("RE-1042", { exact: true }).first()).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: "test-results/landlord-desktop.png", fullPage: true });

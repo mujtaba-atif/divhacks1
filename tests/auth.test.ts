@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { ObjectId } from "mongodb";
 import {
   getCurrentUser,
+  loginSchema,
   loginWithPassword,
   requireLandlord,
   requireTenant,
@@ -71,6 +72,76 @@ test("login stores only a token hash and returns a stable public user projection
   assert.deepEqual(await getCurrentUser(result.token, storage), result.user);
 });
 
+test("login accepts matching tenant and landlord role selections", async () => {
+  for (const credentials of [
+    {
+      role: "tenant" as const,
+      email: "tenant1@rentescrow.demo",
+      password: "TenantDemo123!",
+    },
+    {
+      role: "landlord" as const,
+      email: "landlord@rentescrow.demo",
+      password: "LandlordDemo123!",
+    },
+  ]) {
+    const storage = await storageWithUser(credentials.role);
+    const result = await loginWithPassword({
+      email: credentials.email,
+      password: credentials.password,
+      expectedRole: credentials.role,
+    }, storage);
+
+    assert.equal(result.user.role, credentials.role);
+    assert.equal(storage.sessions.length, 1);
+  }
+});
+
+test("login rejects role mismatches before creating a session", async () => {
+  for (const mismatch of [
+    {
+      accountRole: "tenant" as const,
+      expectedRole: "landlord" as const,
+      email: "tenant1@rentescrow.demo",
+      password: "TenantDemo123!",
+      message: "This account belongs to a tenant. Select Tenant to sign in.",
+    },
+    {
+      accountRole: "landlord" as const,
+      expectedRole: "tenant" as const,
+      email: "landlord@rentescrow.demo",
+      password: "LandlordDemo123!",
+      message: "This account belongs to a landlord. Select Landlord to sign in.",
+    },
+  ]) {
+    const storage = await storageWithUser(mismatch.accountRole);
+    await assert.rejects(
+      loginWithPassword({
+        email: mismatch.email,
+        password: mismatch.password,
+        expectedRole: mismatch.expectedRole,
+      }, storage),
+      (error: Error & { status?: number; code?: string }) => {
+        assert.equal(error.status, 403);
+        assert.equal(error.code, "ROLE_MISMATCH");
+        assert.equal(error.message, mismatch.message);
+        return true;
+      },
+    );
+    assert.equal(storage.sessions.length, 0);
+  }
+});
+
+test("login schema rejects unsupported role selections", () => {
+  const result = loginSchema.safeParse({
+    email: "tenant1@rentescrow.demo",
+    password: "TenantDemo123!",
+    expectedRole: "manager",
+  });
+
+  assert.equal(result.success, false);
+});
+
 test("unknown emails and wrong passwords return the same generic failure without sessions", async () => {
   const storage = await storageWithUser();
   for (const credentials of [
@@ -83,6 +154,24 @@ test("unknown emails and wrong passwords return the same generic failure without
       return true;
     });
   }
+  assert.equal(storage.sessions.length, 0);
+});
+
+test("wrong passwords remain generic even when the selected role is also wrong", async () => {
+  const storage = await storageWithUser("tenant");
+  await assert.rejects(
+    loginWithPassword({
+      email: "tenant1@rentescrow.demo",
+      password: "wrong-password",
+      expectedRole: "landlord",
+    }, storage),
+    (error: Error & { status?: number; code?: string }) => {
+      assert.equal(error.status, 401);
+      assert.equal(error.code, undefined);
+      assert.equal(error.message, "Invalid email or password.");
+      return true;
+    },
+  );
   assert.equal(storage.sessions.length, 0);
 });
 

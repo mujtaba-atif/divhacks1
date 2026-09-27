@@ -62,7 +62,8 @@ async function openTenantHistory(page: Page) {
 
 async function openLandlordHistory(page: Page) {
   await page.goto("/landlord");
-  await expect(page.getByRole("heading", { name: "Assigned repair cases", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Open case RE-1042", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Repair case", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "View building history", exact: true }).first().click();
   return page.getByRole("dialog", { name: "Building history", exact: true });
 }
