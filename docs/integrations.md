@@ -113,54 +113,36 @@ authorization. Verification expires after 60 seconds; financial actions refresh
 it, and testnet tooling checks again immediately before signing. The visible
 account-substitution demonstration is a policy dry run with no settlement.
 
-## Photon
+## Photon Spectrum
 
-The selected API is Photon's legacy
-[Advanced iMessage HTTP proxy](https://github.com/photon-hq/advanced-imessage-http-proxy),
-using its documented
-[`POST /send` implementation](https://github.com/photon-hq/advanced-imessage-http-proxy/blob/main/src/routes/messages.ts).
-This is a specific verified HTTP contract; it does not mix the newer Spectrum
-gRPC or local macOS SDK interfaces.
+The app uses the installed `spectrum-ts` SDK and its official
+[direct-message API](https://photon.codes/docs/spectrum-ts/spaces-and-users).
+Only a validated, explicitly approved send action can dispatch. The adapter
+checks the server-owned tenant/case/contact against an operator allowlist,
+appends the case reference, creates the approved DM, and checks the returned
+outbound message ID, text, conversation, sending line, and timestamp. `sent`
+means provider acceptance, not a delivery/read receipt.
 
-Default sends have `delivery: "demo"` and stay inside the app. External delivery
-requires all three server settings: `PHOTON_LIVE_SEND=true`,
-`PHOTON_PROXY_TOKEN`, and `PHOTON_ALLOWED_RECIPIENT`. The token is the provider's
-base64 encoding of `upstreamServerUrl|apiKey`. The recipient must exactly match
-the configured E.164 phone number or email address. The endpoint is pinned to
-`https://imessage-swagger.photon.codes/send`; no arbitrary URL can receive the
-token. Only an explicit tenant send action should call this adapter.
+Before dispatch, the case mutation checkpoints a pending message. Missing or
+invalid post-dispatch receipts become uncertain, never an automatic retry.
+Provider failures and their sanitized reasons remain in the case/timeline.
+Reset cannot erase live history. Atlas uses optimistic revision checks; if a
+post-send save conflicts, the durable pending record still blocks duplicate
+dispatch until an operator investigates. There is no automatic reconciliation.
 
-The response must contain a successful receipt with a message ID, matching
-recipient, matching text, and send timestamp. `sent` means provider acceptance,
-not delivery or a read receipt. Requests are not automatically retried. Any
-failure after dispatch, including a timeout or malformed/mismatched receipt,
-throws `DeliveryUncertainError` with code `uncertain_delivery`: the message may
-already have been sent, so inspect delivery before retrying. Preflight body,
-configuration, and recipient validation failures are not uncertain sends. The
-backend records uncertainty and temporarily blocks an identical retry. Incoming
-landlord replies remain explicitly simulated; no unauthenticated
-webhook is treated as proof that a landlord completed a repair.
+`pnpm agent` now starts `scripts/spectrum-replies.ts`, not the legacy echo example.
+The worker accepts only authenticated inbound DM text from the approved contact
+in a recorded outbound conversation, matched by tenant, case, sending line,
+provider ID and time. Threaded replies must reference a matching outbound ID.
+It persists and classifies replies but never auto-replies, changes payment
+destinations, or authorizes financial actions. Browser-entered sample replies
+remain explicitly demo data. No public unauthenticated webhook is exposed.
 
-### Spectrum worker
-
-`pnpm agent` starts the standalone `scripts/spectrum-agent.ts` worker using
-the installed `spectrum-ts` SDK. Put `SPECTRUM_PROJECT_ID` and
-`SPECTRUM_PROJECT_SECRET` in ignored `.env.local`, or supply them as environment
-variables. This is not a proxy token and does not enable the app's Photon adapter.
-
-Starting the worker explicitly enables real replies to new inbound iMessage
-text, including group conversations. Use a dedicated test project with consenting
-participants. It does not register a webhook, update Atlas, or authorize any
-repair or financial state. Provider-side profile/contact-card sharing may also
-occur when enabled in the Spectrum project; disable that setting in the provider
-dashboard when it is not wanted.
-
-The worker excludes outgoing messages and pre-start history, remembers handled
-message IDs for the process lifetime, and does not retry an uncertain send.
-Stop and inspect delivery after a send failure before restarting. Application
-logs omit message bodies and sender addresses, and SDK telemetry is disabled.
-Ctrl+C shuts down the SDK. Automated tests inject a fake client and never start
-a live listener or send iMessages.
+The unwrapped SDK can share a provider contact card before application filtering.
+Our reply provider disables that behavior locally through a tested, version-pinned
+provider configuration wrapper, without changing cloud settings or token renewal.
+SDK telemetry is off and application logs omit credentials, contacts and bodies.
+See [configuration, limitations, and walkthrough](photon-spectrum.md).
 
 ### Dependency setup
 

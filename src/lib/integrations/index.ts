@@ -1,6 +1,7 @@
 import type { IntegrationStatus } from "../types";
 import { assertServer } from "./shared";
 import { getXrplConfig } from "./xrpl-settlement";
+import { getPhotonConfig } from "./photon";
 
 export { lookupBuilding } from "./nyc-open-data";
 export { analyzeEvidence, classifyLandlordReply, classifyReplyByRules, verifyEvidence } from "./gemini";
@@ -13,8 +14,10 @@ export function getIntegrationStatus(): IntegrationStatus[] {
   const gemini = Boolean(process.env.GEMINI_API_KEY);
   const nessieEnabled = process.env.NESSIE_ENABLED === "true";
   const nessie = Boolean(process.env.NESSIE_API_KEY && process.env.NESSIE_TENANT_ID && process.env.NESSIE_CUSTOMER_ID && process.env.NESSIE_ACCOUNT_ID);
-  const photonEnabled = process.env.PHOTON_LIVE_SEND === "true";
-  const photon = Boolean(process.env.PHOTON_PROXY_TOKEN && process.env.PHOTON_ALLOWED_RECIPIENT);
+  let photon: IntegrationStatus = { id: "photon", name: "Photon iMessage", status: "demo", detail: "Messages remain in the demo. No external delivery." };
+  try {
+    if (getPhotonConfig()) photon = { ...photon, status: "configured", detail: "Spectrum credentials and a fixed tenant/case/recipient are configured. Only approved sends can reach iMessage; connectivity and delivery are not implied by this status." };
+  } catch { photon = { ...photon, status: "unavailable", detail: "Live messaging is enabled but Spectrum credentials or tenant/case/recipient binding are incomplete. No demo fallback is used." }; }
   const mongoEnabled = process.env.RENTESCROW_STORAGE === "mongodb";
   let xrpl: IntegrationStatus = { id: "xrpl", name: "XRP Ledger", status: "demo", detail: "USD escrow is simulated. Run pnpm xrpl:setup-testnet to enable a separate real Testnet Payment after verified repair." };
   try {
@@ -27,7 +30,7 @@ export function getIntegrationStatus(): IntegrationStatus[] {
     { id: "mongodb", name: "MongoDB Atlas", status: mongoEnabled ? (process.env.MONGODB_URI ? "configured" : "unavailable") : "demo", detail: mongoEnabled ? "MongoDB persistence selected; connectivity is checked when data is loaded." : "Session-scoped local storage." },
     { id: "nyc", name: "NYC Open Data", status: "public", detail: "Public HPD complaints and violations lookup. The named demo building uses labeled fictional records." },
     { id: "nessie", name: "Capital One Nessie", status: nessieEnabled ? (nessie ? "configured" : "unavailable") : "demo", detail: nessieEnabled ? "Read-only sandbox banking API selected. Customer/account ownership is checked for the operator-bound tenant. Connectivity is verified per case, not by this status." : "Explicit local customer/account fixtures, not a Nessie API connection or real identity verification." },
-    { id: "photon", name: "Photon iMessage", status: photonEnabled ? (photon ? "configured" : "unavailable") : "demo", detail: photonEnabled ? "Explicit send actions may reach the configured approved recipient through the Photon HTTP proxy." : "Messages remain in the demo. No external delivery." },
+    photon,
     xrpl,
   ];
 }

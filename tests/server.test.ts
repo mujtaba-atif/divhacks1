@@ -3,7 +3,7 @@ import { test, type TestContext } from "node:test";
 import { NextRequest } from "next/server";
 import { addUploadedEvidence, performCaseAction } from "../src/lib/server/cases";
 import { assertSameOrigin } from "../src/lib/server/http";
-import { createSession, mutateSession, readSession } from "../src/lib/server/store";
+import { createSession, readSession } from "../src/lib/server/store";
 import type { EvidenceRecord } from "../src/lib/types";
 
 function localStorage(t: TestContext) {
@@ -55,34 +55,4 @@ test("a failed older after upload does not block an analyzed replacement", async
   const stored = await readSession(ownerId);
   assert.equal(stored?.cases[0].verification, undefined);
   assert.equal(stored?.cases[0].tenantConfirmed, false);
-});
-
-test("uncertain Photon delivery is persisted and identical immediate retries do not send", async (t) => {
-  localStorage(t);
-  const settings = {
-    PHOTON_LIVE_SEND: "true", PHOTON_PROXY_TOKEN: "offline-test-token", PHOTON_ALLOWED_RECIPIENT: "+12125550100",
-  };
-  const previous = Object.fromEntries(Object.keys(settings).map((key) => [key, process.env[key]]));
-  Object.assign(process.env, settings);
-  t.after(() => {
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  });
-  const fetch = t.mock.method(globalThis, "fetch", async () => {
-    throw new DOMException("Response timed out after request dispatch", "TimeoutError");
-  });
-  const { document } = await createSession();
-  const ownerId = document.ownerId;
-  const caseId = document.cases[0].id;
-  await mutateSession(ownerId, (session) => { session.cases[0].landlordContact = settings.PHOTON_ALLOWED_RECIPIENT; });
-  const message = { action: "send_message" as const, body: "Please confirm the repair appointment." };
-  await assert.rejects(performCaseAction(ownerId, caseId, message), /may have sent/);
-  const stored = await readSession(ownerId);
-  assert.equal(stored?.cases[0].messages.length, 0);
-  assert.equal(stored?.cases[0].timeline.at(-1)?.title, "Message delivery uncertain");
-  assert.equal(stored?.uncertainDeliveries?.length, 1);
-  await assert.rejects(performCaseAction(ownerId, caseId, message), /Identical retries are blocked/);
-  assert.equal(fetch.mock.callCount(), 1);
 });

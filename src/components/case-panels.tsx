@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowDownLeft, ArrowRight, ArrowUpRight, BadgeCheck, Building2, CalendarDays, Check, CheckCheck, CheckCircle2, ChevronRight, CircleDollarSign, ExternalLink, FileImage, FileText, FlaskConical, ImagePlus, LockKeyhole, Mail, MessageSquare, Paperclip, Plus, RefreshCw, ScanLine, Send, ShieldCheck, ShieldX, Sparkles, Thermometer, Upload, Wallet, Wrench } from "lucide-react";
-import type { CaseAction, CaseRecord, EvidenceRecord, EvidenceStage, IntegrationStatus, PolicyResult } from "@/lib/types";
+import type { CaseAction, CaseMessage, CaseRecord, EvidenceRecord, EvidenceStage, IntegrationStatus, PolicyResult } from "@/lib/types";
 import { Button, CheckRow, EmptyState, fullDate, money, SectionHeading, shortDate, time } from "./workspace-ui";
 
 export type WorkspaceTab = "overview" | "evidence" | "messages" | "finances" | "escrow";
@@ -95,7 +95,7 @@ export function OverviewPanel({ record, pending, onAction, onTab, onUpload, onPr
   const analyzedEvidence = [...record.evidence].reverse().find((item) => item.analysis && (!record.verification || item.stage === "after"));
   const featuredEvidence = analyzedEvidence || before || record.evidence[0];
   const latestAnalysis = analyzedEvidence?.analysis;
-  const notified = record.messages.some((message) => message.sender === "tenant");
+  const notified = record.messages.some((message) => message.sender === "tenant" && (message.delivery === "demo" || message.delivery === "sent"));
   const isResolved = record.status === "resolved";
   const funded = record.escrow.status !== "unfunded";
   const phase = isResolved ? 4 : record.verification?.verified ? 3 : record.repairReported ? 2 : notified ? 1 : 0;
@@ -163,19 +163,94 @@ export function draftNotice(record: CaseRecord) {
   return `Hello ${record.landlordName},\n\nI'm writing about the ${record.issue === "heating" ? "lack of heat" : record.issue + " issue"} in apartment ${record.apartment} at ${record.building.address}, first noticed on ${fullDate(record.noticedAt)}.\n\n${record.description}\n\nI've documented the issue and would appreciate a repair timeline. Please confirm when someone can inspect the apartment and complete the necessary repair.\n\nThank you.`;
 }
 
-export function MessagesPanel({ record, pending, onAction, liveDelivery = false }: CommonProps & { liveDelivery?: boolean }) {
+function canonicalMessageBody(body: string, caseId: string) {
+  const text = body.trim();
+  const reference = `\n\nRentEscrow case: ${caseId}`;
+  return text.endsWith(reference) ? text : `${text}${reference}`;
+}
+
+export function findOutboundMessage(record: CaseRecord, body: string, requestId?: string) {
+  return record.messages.find((message) => message.sender === "tenant" && requestId && message.requestId === requestId)
+    ?? [...record.messages].reverse().find((message) => message.sender === "tenant"
+      && message.recipient === record.landlordContact.trim()
+      && canonicalMessageBody(message.body, record.id) === canonicalMessageBody(body, record.id));
+}
+
+function messageDeliveryLabel(message: CaseMessage) {
+  switch (message.delivery) {
+    case "demo": return "Simulated delivery";
+    case "sent": return message.provider === "spectrum" ? "Accepted by Spectrum" : message.provider === "photon" ? "Accepted by Photon" : "Accepted by provider";
+    case "received": return "Received";
+    case "pending": return "Delivery pending";
+    case "failed": return "Not sent";
+    case "uncertain": return "Delivery unconfirmed";
+  }
+}
+
+export function MessagesPanel({ record, pending, onAction, integration }: CommonProps & { integration: IntegrationStatus | undefined }) {
   const [draft, setDraft] = useState(() => draftNotice(record));
   const [approved, setApproved] = useState(false);
   const [localError, setLocalError] = useState("");
-  useEffect(() => { setDraft(draftNotice(record)); setApproved(false); setLocalError(""); }, [record.id]); // A case switch must never reuse another recipient's draft.
+  const requestId = useRef<string | null>(null);
+  useEffect(() => { setDraft(draftNotice(record)); setApproved(false); setLocalError(""); requestId.current = null; }, [record.id]); // Never reuse another case's draft or approval.
   const resolved = record.status === "resolved";
-  async function send() {
-    if (!approved || !draft.trim()) return;
-    const result = await onAction({ action: "send_message", body: draft.trim() });
-    if (result) { setDraft(""); setApproved(false); setLocalError(""); }
-    else setLocalError("");
+  const liveDelivery = integration?.status === "configured";
+  const deliveryUnavailable = !liveDelivery && integration?.status !== "demo";
+  const unresolvedAttempt = record.messages.find((message) => message.sender === "tenant"
+    && canonicalMessageBody(message.body, record.id) === canonicalMessageBody(draft, record.id)
+    && (message.delivery === "pending" || message.delivery === "uncertain"));
+
+  function updateDraft(value: string) {
+    setDraft(value); setApproved(false); setLocalError(""); requestId.current = null;
   }
-  return <section className="tab-content"><SectionHeading eyebrow="TENANT-APPROVED COMMUNICATION" title="Conversation"><span className="muted small"><Mail size={14} />{record.landlordContact}</span></SectionHeading><div className="messages-layout"><div className="conversation"><div className="conversation-heading"><span className="person-avatar">{record.landlordName.charAt(0)}</span><div><strong>{record.landlordName}</strong><span>Property manager</span></div><span className="subtle-badge">{liveDelivery ? "External delivery enabled" : "Demo delivery"}</span></div><div className="conversation-messages">{record.messages.length === 0 ? <EmptyState icon={MessageSquare} title="Start the conversation">No messages have been sent for this case yet.</EmptyState> : record.messages.map((message) => <article className={`message message-${message.sender}`} key={message.id}><div className="message-meta"><strong>{message.sender === "tenant" ? "You" : message.sender === "landlord" ? record.landlordName : "RentEscrow assistant"}</strong><time>{shortDate(message.createdAt)} at {time(message.createdAt)}</time></div><p>{message.body}</p><div className="message-delivery">{message.delivery === "received" ? <ArrowDownLeft size={12} /> : <CheckCheck size={12} />}{message.delivery === "demo" ? "Simulated delivery" : message.delivery === "received" ? "Received" : "Sent"}</div></article>)}</div>{!resolved && <div className="demo-replies"><span className="eyebrow"><FlaskConical size={13} />SAMPLE LANDLORD REPLIES</span><div><Button icon={CalendarDays} onClick={() => { void onAction({ action: "simulate_landlord_reply", variant: "scheduled" }); }} disabled={!!pending || record.repairReported}>Schedule repair</Button><Button icon={Wrench} onClick={() => { void onAction({ action: "simulate_landlord_reply", variant: "completed" }); }} disabled={!!pending || record.repairReported}>Report repair complete</Button></div></div>}</div><section className="message-composer"><div className="composer-heading"><span className="small-heading"><FileText size={17} />Message draft</span><Button variant="ghost" icon={Sparkles} onClick={() => { setDraft(draftNotice(record)); setApproved(false); }} disabled={resolved}>Draft notice</Button></div><label className="field"><span>To <strong>{record.landlordName}</strong></span><textarea aria-label="Message to property manager" rows={14} value={draft} onChange={(event) => { setDraft(event.target.value); setApproved(false); }} maxLength={5000} disabled={resolved} placeholder="Write a message to your property manager..." /></label><div className="composer-count"><span><Paperclip size={13} />Case {record.id} referenced</span><span>{draft.length}/5,000</span></div><label className="checkbox-label"><input type="checkbox" checked={approved} disabled={resolved || !draft.trim()} onChange={(event) => setApproved(event.target.checked)} /><span>I reviewed this message and approve sending it.</span></label>{localError && <p className="form-error" role="alert">{localError}</p>}<Button variant="primary" className="full-width" icon={Send} busy={pending === "send_message"} disabled={resolved || !!pending || !approved || !draft.trim()} onClick={() => { void send(); }}>Approve & send</Button><p className="panel-footnote">{liveDelivery ? "Approved messages are sent externally through Photon to the configured recipient." : "Demo messages stay within this workspace."}</p></section></div></section>;
+  function approveDraft(checked: boolean) {
+    if (checked && record.messages.some((message) => message.requestId === requestId.current && message.delivery === "failed")) requestId.current = null;
+    setApproved(checked);
+  }
+  async function send() {
+    if (resolved || pending || deliveryUnavailable || unresolvedAttempt || !approved || !draft.trim()) return;
+    const attemptId = requestId.current ?? crypto.randomUUID();
+    requestId.current = attemptId;
+    setApproved(false); setLocalError("");
+    const result = await onAction({ action: "send_message", body: draft.trim(), approved: true, requestId: attemptId });
+    const message = result ? findOutboundMessage(result, draft.trim(), attemptId) : undefined;
+    if (message?.delivery === "demo" || message?.delivery === "sent") {
+      setDraft(""); requestId.current = null;
+    } else if (!result) {
+      setLocalError("Your draft is kept. Review the delivery status before approving another attempt.");
+    }
+  }
+  return <section className="tab-content">
+    <SectionHeading eyebrow="TENANT-APPROVED COMMUNICATION" title="Conversation"><span className="muted small break-word"><Mail size={14} />{record.landlordContact}</span></SectionHeading>
+    <div className="messages-layout">
+      <div className="conversation">
+        <div className="conversation-heading"><span className="person-avatar">{record.landlordName.charAt(0)}</span><div><strong>{record.landlordName}</strong><span>Property manager</span></div><span className="subtle-badge">{liveDelivery ? "External delivery enabled" : deliveryUnavailable ? "Delivery unavailable" : "Demo delivery"}</span></div>
+        <div className="conversation-messages">{record.messages.length === 0 ? <EmptyState icon={MessageSquare} title="Start the conversation">No messages have been sent for this case yet.</EmptyState> : record.messages.map((message) => <article className={`message message-${message.sender}`} key={message.id}>
+          <div className="message-meta"><strong>{message.sender === "tenant" ? "You" : message.sender === "landlord" ? record.landlordName : "RentEscrow assistant"}</strong><time>{shortDate(message.createdAt)} at {time(message.createdAt)}</time></div>
+          <p>{message.body}</p>
+          <div className="message-delivery">{message.delivery === "received" ? <ArrowDownLeft size={12} /> : message.delivery === "pending" ? <RefreshCw size={12} /> : message.delivery === "failed" || message.delivery === "uncertain" ? <ShieldX size={12} /> : <CheckCheck size={12} />}{messageDeliveryLabel(message)}</div>
+          {message.delivery === "sent" && <p className="small muted">Provider acceptance is recorded; this is not a delivery or read receipt.</p>}
+          {message.delivery === "pending" && <p className="small muted">This attempt is awaiting confirmation. Do not resend it.</p>}
+          {message.delivery === "uncertain" && <p className="small muted">The provider may have accepted this message. Check the recipient's conversation before another send.</p>}
+          {message.failureReason && <p className="form-error" role="status">{message.failureReason}</p>}
+          {message.providerMessageId && <p className="small muted break-word">Provider reference: <span className="mono">{message.providerMessageId}</span></p>}
+          {message.recipient && <p className="small muted break-word">Recipient: {message.recipient}</p>}
+        </article>)}</div>
+        {!resolved && <div className="demo-replies"><span className="eyebrow"><FlaskConical size={13} />SAMPLE LANDLORD REPLIES</span><div><Button icon={CalendarDays} onClick={() => { void onAction({ action: "simulate_landlord_reply", variant: "scheduled" }); }} disabled={!!pending || record.repairReported}>Schedule repair</Button><Button icon={Wrench} onClick={() => { void onAction({ action: "simulate_landlord_reply", variant: "completed" }); }} disabled={!!pending || record.repairReported}>Report repair complete</Button></div></div>}
+      </div>
+      <section className="message-composer">
+        <div className="composer-heading"><span className="small-heading"><FileText size={17} />Message draft</span><Button variant="ghost" icon={Sparkles} onClick={() => updateDraft(draftNotice(record))} disabled={resolved || !!pending}>Draft notice</Button></div>
+        <label className="field"><span>To <strong>{record.landlordName}</strong></span><textarea aria-label="Message to property manager" rows={14} value={draft} onChange={(event) => updateDraft(event.target.value)} maxLength={5000} disabled={resolved || !!pending} placeholder="Write a message to your property manager..." /></label>
+        <div className="composer-count"><span><Paperclip size={13} />Case {record.id} referenced</span><span>{draft.length}/5,000</span></div>
+        <label className="checkbox-label"><input type="checkbox" checked={approved} disabled={resolved || !!pending || deliveryUnavailable || !!unresolvedAttempt || !draft.trim()} onChange={(event) => approveDraft(event.target.checked)} /><span>I reviewed this message and approve sending it.</span></label>
+        {unresolvedAttempt && <p className="form-error" role="status">An earlier attempt for this message is {unresolvedAttempt.delivery === "pending" ? "pending" : "unconfirmed"}. A new send is blocked to avoid duplicates.</p>}
+        {localError && <p className="form-error" role="alert">{localError}</p>}
+        <Button variant="primary" className="full-width" icon={Send} busy={pending === "send_message"} disabled={resolved || !!pending || deliveryUnavailable || !!unresolvedAttempt || !approved || !draft.trim()} onClick={() => { void send(); }}>Approve & send</Button>
+        <p className="panel-footnote">{integration?.detail || "Messaging configuration is unavailable. No external send is available."}</p>
+        {!liveDelivery && !deliveryUnavailable && <p className="panel-footnote">Demo messages stay within this workspace.</p>}
+      </section>
+    </div>
+  </section>;
 }
 
 export function EscrowPanel({ record, pending, onAction, onRelease, onXrplReview, policy, xrplIntegration }: CommonProps & { onRelease: () => void; onXrplReview: () => void; policy: PolicyResult | null; xrplIntegration: IntegrationStatus | undefined }) {

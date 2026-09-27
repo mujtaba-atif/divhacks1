@@ -231,6 +231,11 @@ export async function withXrplWalletLock<T>(source: string, operation: () => Pro
 
 export async function resetSession(ownerId: string) {
   return mutateSession(ownerId, async (document) => {
+    if (document.uncertainDeliveries?.length || document.cases.some((item) => item.messages.some((message) =>
+      (message.provider === "spectrum" || message.provider === "photon" || message.provider === undefined)
+      && ["sent", "received", "pending", "uncertain"].includes(message.delivery)))) {
+      throw new ApiError(409, "This session contains live messaging records and cannot be reset. Start a new browser session to preserve delivery and reply history.", false, "MESSAGE_HISTORY_PRESERVED");
+    }
     for (const item of document.cases) {
       const journal = item.xrplSettlement ? await readXrplJournal(item.xrplSettlement) : null;
       if (item.xrplSettlement?.status === "pending" || journal?.status === "pending") {

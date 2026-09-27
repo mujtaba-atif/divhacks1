@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ArrowDownToLine, Building2, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, CircleUserRound, FileImage, FileText, FlaskConical, LayoutDashboard, LoaderCircle, LockKeyhole, Menu, MessageSquare, Plus, PlugZap, RefreshCw, Search, ShieldCheck, Upload, Wallet, X } from "lucide-react";
 import type { BuildingRecord, CaseAction, CaseRecord, DashboardData, EvidenceRecord, EvidenceStage, PolicyResult } from "@/lib/types";
-import { ActivityTimeline, canRelease, canReviewXrplSettlement, EscrowPanel, EvidencePanel, evidenceSource, formatTestXrp, MessagesPanel, OverviewPanel, type WorkspaceTab } from "./case-panels";
+import { ActivityTimeline, canRelease, canReviewXrplSettlement, EscrowPanel, EvidencePanel, evidenceSource, findOutboundMessage, formatTestXrp, MessagesPanel, OverviewPanel, type WorkspaceTab } from "./case-panels";
 import { FinancesPanel } from "./finances-panel";
 import { NewCaseDialog, type NewCaseInput } from "./new-case-dialog";
 import { Button, EmptyState, fullDate, Modal, money, StatusBadge } from "./workspace-ui";
@@ -31,7 +31,14 @@ function actionMessage(action: CaseAction, record: CaseRecord, policy?: PolicyRe
   switch (action.action) {
     case "add_demo_evidence": return `${action.stage === "before" ? "Before" : "After"}-repair sample added to the case.`;
     case "analyze_evidence": return "Evidence analysis added to the case record.";
-    case "send_message": return "Your approved message was recorded.";
+    case "send_message": {
+      const message = findOutboundMessage(record, action.body, action.requestId);
+      if (message?.delivery === "demo") return "Message saved in the demo. No external delivery.";
+      if (message?.delivery === "sent") return "The provider accepted your message. Delivery and reading are not confirmed.";
+      if (message?.delivery === "failed") return "Message not sent. Your draft is kept for review.";
+      if (message?.delivery === "pending") return "Message delivery is pending. Do not resend.";
+      return "Message delivery is unconfirmed. Review the conversation before another attempt.";
+    }
     case "simulate_landlord_reply": return action.variant === "completed" ? "Sample repair completion recorded. Add and analyze after-repair evidence next." : "Sample repair appointment recorded.";
     case "record_landlord_reply": return `Landlord reply recorded: ${record.timeline.at(-1)?.title ?? "case updated"}.`;
     case "create_escrow": return `${money(record.escrow.amountCents)} set aside in simulated escrow.`;
@@ -65,6 +72,7 @@ export default function RentWorkspace() {
   const [financialPolicy, setFinancialPolicy] = useState<PolicyResult | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const mutationBusy = useRef(false);
+  const mutationVersion = useRef(0);
   const record = data?.cases.find((item) => item.id === activeId) || data?.cases[0];
   const xrplIntegration = data?.integrations.find((item) => item.id === "xrpl");
   const geminiIntegration = data?.integrations.find((item) => item.id === "gemini");
@@ -80,6 +88,26 @@ export default function RentWorkspace() {
   }, []);
 
   useEffect(() => { void loadDashboard(); }, [loadDashboard]);
+  useEffect(() => {
+    if (tab !== "messages" || pending) return;
+    let cancelled = false;
+    let refreshing = false;
+    async function refreshDashboard() {
+      if (document.visibilityState !== "visible" || mutationBusy.current || refreshing) return;
+      const version = mutationVersion.current;
+      refreshing = true;
+      try {
+        const latest = await request<DashboardData>("/api/dashboard");
+        // A background read must never overwrite a newer mutation or another view.
+        if (!cancelled && !mutationBusy.current && version === mutationVersion.current) setData(latest);
+      } catch { /* Keep the current conversation and draft available during a refresh outage. */ }
+      finally { refreshing = false; }
+    }
+    const interval = window.setInterval(() => { void refreshDashboard(); }, 5_000);
+    const onVisibilityChange = () => { void refreshDashboard(); };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => { cancelled = true; window.clearInterval(interval); document.removeEventListener("visibilitychange", onVisibilityChange); };
+  }, [tab, pending]);
   useEffect(() => { if (!toast) return; const timeout = window.setTimeout(() => setToast(null), 6500); return () => window.clearTimeout(timeout); }, [toast]);
   useEffect(() => { if (!mobileNav) return; const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setMobileNav(false); }; window.addEventListener("keydown", escape); return () => window.removeEventListener("keydown", escape); }, [mobileNav]);
 
@@ -89,13 +117,14 @@ export default function RentWorkspace() {
 
   async function runAction(action: CaseAction): Promise<CaseRecord | null> {
     if (!record || mutationBusy.current) return null;
-    mutationBusy.current = true; setPending(action.action); setError(null); setToast(null); setFinancialPolicy(null);
+    mutationBusy.current = true; mutationVersion.current += 1; setPending(action.action); setError(null); setToast(null); setFinancialPolicy(null);
     try {
       const result = await request<{ case: CaseRecord; policy?: PolicyResult }>(`/api/cases/${encodeURIComponent(record.id)}/actions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action) });
       updateRecord(result.case);
       setPolicy(action.action === "check_financial_binding" ? null : result.policy ?? null);
       if (action.action === "check_financial_binding") setFinancialPolicy(result.policy ?? null);
-      setToast({ message: actionMessage(action, result.case, result.policy), tone: result.policy?.approved === false || (action.action === "verify_repair" && !result.case.verification?.verified) || (action.action === "sync_finances" && result.case.financialProfile?.status !== "verified") ? "info" : "success" });
+      const delivery = action.action === "send_message" ? findOutboundMessage(result.case, action.body, action.requestId)?.delivery : undefined;
+      setToast({ message: actionMessage(action, result.case, result.policy), tone: (action.action === "send_message" && delivery !== "demo" && delivery !== "sent") || result.policy?.approved === false || (action.action === "verify_repair" && !result.case.verification?.verified) || (action.action === "sync_finances" && result.case.financialProfile?.status !== "verified") ? "info" : "success" });
       return result.case;
     } catch (cause) {
       if (cause instanceof RequestError) {
@@ -110,7 +139,7 @@ export default function RentWorkspace() {
 
   async function createCase(input: NewCaseInput) {
     if (mutationBusy.current) return false;
-    mutationBusy.current = true; setPending("create_case"); setError(null);
+    mutationBusy.current = true; mutationVersion.current += 1; setPending("create_case"); setError(null);
     try {
       const result = await request<{ case: CaseRecord }>("/api/cases", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
       setData((current) => current ? { ...current, cases: [...current.cases, result.case] } : current);
@@ -122,7 +151,7 @@ export default function RentWorkspace() {
 
   async function uploadEvidence(form: FormData) {
     if (!record || mutationBusy.current) return false;
-    mutationBusy.current = true; setPending("upload_evidence"); setError(null);
+    mutationBusy.current = true; mutationVersion.current += 1; setPending("upload_evidence"); setError(null);
     try {
       const result = await request<{ case: CaseRecord }>(`/api/cases/${encodeURIComponent(record.id)}/evidence`, { method: "POST", body: form });
       const previousIds = new Set(record.evidence.map((item) => item.id));
@@ -140,7 +169,7 @@ export default function RentWorkspace() {
 
   async function resetDemo() {
     if (mutationBusy.current) return;
-    mutationBusy.current = true; setPending("reset"); setError(null);
+    mutationBusy.current = true; mutationVersion.current += 1; setPending("reset"); setError(null);
     try {
       const result = await request<DashboardData>("/api/demo/reset", { method: "POST" });
       setData(result); setActiveId(result.cases[0]?.id || ""); setTab("overview"); setModal(null); setPolicy(null); setFinancialPolicy(null); setToast({ message: "The demo workspace has been reset to its sample case.", tone: "success" });
@@ -178,7 +207,7 @@ export default function RentWorkspace() {
           <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} tabIndex={0} className="tab-panel">
             {tab === "overview" && <OverviewPanel record={record} pending={pending} onAction={runAction} onTab={setTab} onUpload={() => openModal("upload")} onPreview={setPreview} onActivity={() => openModal("activity")} onBuilding={() => openModal("building")} />}
             {tab === "evidence" && <EvidencePanel record={record} pending={pending} onAction={runAction} onUpload={() => openModal("upload")} onPreview={setPreview} geminiIntegration={geminiIntegration} />}
-            {tab === "messages" && <MessagesPanel record={record} pending={pending} onAction={runAction} liveDelivery={data.integrations.some((item) => item.id === "photon" && item.status === "configured")} />}
+            {tab === "messages" && <MessagesPanel record={record} pending={pending} onAction={runAction} integration={data.integrations.find((item) => item.id === "photon")} />}
             {tab === "finances" && <FinancesPanel record={record} pending={pending} onAction={runAction} onExpense={() => openModal("expense")} policy={financialPolicy} nessieConfigured={data.integrations.some((item) => item.id === "nessie" && item.status === "configured")} />}
             {tab === "escrow" && <EscrowPanel record={record} pending={pending} onAction={runAction} onRelease={() => openModal("release")} onXrplReview={() => openModal("xrpl-settle")} policy={policy} xrplIntegration={xrplIntegration} />}
           </div>
