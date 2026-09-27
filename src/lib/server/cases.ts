@@ -27,6 +27,7 @@ import type {
   TransactionIntent,
 } from "@/lib/types";
 import type { z } from "zod";
+import { linkLandlordContact } from "./agent-links";
 import { ApiError } from "./errors";
 import { findCase, mutateSession, updateSharedBalance, type SessionDocument } from "./store";
 import type { newCaseSchema } from "./validation";
@@ -174,12 +175,26 @@ function simulateSigningBoundary(caseRecord: CaseRecord, intent: Readonly<Transa
 
 export async function createCase(ownerId: string, input: z.infer<typeof newCaseSchema>) {
   const building = await lookupBuilding(input.address, input.borough);
-  return mutateSession(ownerId, (document) => {
+  const created = await mutateSession(ownerId, (document) => {
     if (document.cases.length >= 20) throw new ApiError(409, "This demo allows up to 20 cases per session.");
     const caseRecord = createNewCase(ownerId, { ...input, building });
     caseRecord.accountBalanceCents = document.accountBalanceCents;
     document.cases.push(caseRecord);
     return caseRecord;
+  });
+  await linkLandlordContact(created.landlordContact, ownerId, created.id);
+  return created;
+}
+
+// Applies a landlord's real iMessage reply, routed by the Spectrum agent, to the linked case.
+export async function recordInboundLandlordReply(ownerId: string, caseId: string, body: string) {
+  return mutateSession(ownerId, async (document) => {
+    const caseRecord = findCase(document, caseId);
+    assertMutable(caseRecord);
+    const text = body.trim();
+    const classification = await classifyLandlordReply(text, caseRecord);
+    applyLandlordReply(caseRecord, text, "received", classification);
+    return { case: caseRecord, classification };
   });
 }
 
