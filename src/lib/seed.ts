@@ -1,6 +1,11 @@
 import type { BuildingRecord, CaseRecord, IssueType } from "./types";
 import { demoFinancialProfile, demoRentHistory } from "./financial-fixture";
 
+export const DEMO_PARTICIPANTS = {
+  tenant: { name: "Mujtaba Atif", phone: "+12018567033" },
+  landlord: { name: "Rayyan Khan", phone: "+19736060558" },
+} as const;
+
 const at = (daysAgo = 0, hour = 10) => {
   const date = new Date();
   date.setDate(date.getDate() - daysAgo);
@@ -82,10 +87,11 @@ export function createDemoCase(ownerId: string): CaseRecord {
   const record = createNewCase(ownerId, {
     issue: "heating", description: "My apartment has had no heat for three days. The living room is 54 degrees even with the windows closed.",
     noticedAt: at(3), address: "123 Example Street", borough: "Brooklyn", apartment: "4B",
-    landlordName: "Alex Morgan", landlordContact: "", monthlyRentCents: 185000,
+    landlordName: DEMO_PARTICIPANTS.landlord.name, landlordContact: DEMO_PARTICIPANTS.landlord.phone, monthlyRentCents: 185000,
     disputedAmountCents: 40000, building: demoBuilding(),
   });
   record.id = "RE-1042";
+  record.tenant = { ...DEMO_PARTICIPANTS.tenant };
   record.financialProfile = demoFinancialProfile(ownerId, record.id);
   record.escrow.id = "ESC-RE-1042";
   record.createdAt = at(3, 9);

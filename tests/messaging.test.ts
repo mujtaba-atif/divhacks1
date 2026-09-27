@@ -17,11 +17,13 @@ let createSession: typeof import("../src/lib/server/store")["createSession"];
 let mutateSession: typeof import("../src/lib/server/store")["mutateSession"];
 let readSession: typeof import("../src/lib/server/store")["readSession"];
 let resetSession: typeof import("../src/lib/server/store")["resetSession"];
+let bindPhotonCase: typeof import("../scripts/bind-photon-case")["bindPhotonCase"];
 before(async () => {
   directory = await mkdtemp(path.join(tmpdir(), "rentescrow-messaging-"));
   process.chdir(directory);
   ({ performCaseAction, receiveLandlordMessage } = await import("../src/lib/server/cases"));
   ({ createSession, mutateSession, readSession, resetSession } = await import("../src/lib/server/store"));
+  ({ bindPhotonCase } = await import("../scripts/bind-photon-case"));
 });
 after(async () => { process.chdir(originalDirectory); await rm(directory, { recursive: true, force: true }); });
 
@@ -71,6 +73,90 @@ test("both schema and service require explicit tenant approval and a request UUI
   }
   assert.equal(f.calls(), 0);
   assert.equal((await readSession(f.ownerId))?.cases[0].messages.length, 0);
+});
+
+test("operator correction preserves case history and financial state; reset restores the same demo roles", async () => {
+  const f = await fixture();
+  process.env.PHOTON_ALLOWED_RECIPIENT = "+19736060558";
+  await mutateSession(f.ownerId, (document) => {
+    const record = document.cases[0];
+    record.landlordName = "Alex Morgan";
+    record.landlordContact = "";
+    delete record.tenant;
+    record.messages.push({ id: "old-failure", sender: "tenant", body: "Historical failure", recipient: "", delivery: "failed", provider: "spectrum", createdAt: new Date().toISOString() });
+  });
+  const before = (await readSession(f.ownerId))!;
+  const other = await createSession();
+  const corrected = await bindPhotonCase();
+  assert.equal(corrected.landlordName, "Rayyan Khan");
+  assert.equal(corrected.landlordContact, "+19736060558");
+  assert.deepEqual(corrected.tenant, { name: "Mujtaba Atif", phone: "+12018567033" });
+  for (const key of ["ownerId", "messages", "evidence", "escrow", "financialProfile", "accountBalanceCents"] as const) {
+    assert.deepEqual(corrected[key], before.cases[0][key]);
+  }
+  assert.deepEqual(await readSession(other.document.ownerId), other.document);
+  assert.deepEqual(await bindPhotonCase(), corrected, "repeat correction does not append another audit event");
+  await resetSession(f.ownerId);
+  const reset = (await readSession(f.ownerId))!.cases[0];
+  assert.equal(reset.landlordName, corrected.landlordName);
+  assert.equal(reset.landlordContact, corrected.landlordContact);
+  assert.deepEqual(reset.tenant, corrected.tenant);
+  assert.equal(reset.ownerId, f.ownerId);
+});
+
+test("normalized send logging identifies roles without logging credentials or message text", async (t) => {
+  const f = await fixture();
+  const logger = t.mock.method(console, "info", () => {});
+  await mutateSession(f.ownerId, (document) => { document.cases[0].landlordContact = "+1 (212) 555-0100"; });
+  const sent = await performCaseAction(f.ownerId, f.caseId, action("Private notice body"), f.dependencies);
+  assert.equal(sent.case.messages.at(-1)?.recipient, recipient);
+  const logged = logger.mock.calls[0].arguments[1] as unknown as Record<string, unknown>;
+  assert.equal(logged.normalizedRecipient, recipient);
+  assert.equal(logged.allowedRecipient, recipient);
+  assert.equal(logged.provider, "spectrum");
+  assert.deepEqual(logged.tenant, { ownerId: f.ownerId, name: "Mujtaba Atif", phone: "+12018567033" });
+  assert.doesNotMatch(JSON.stringify(logger.mock.calls), /offline-secret|Private notice body|SPECTRUM_PROJECT_SECRET/);
+});
+
+test("operator role correction cannot erase or rebind live or legacy uncertain history", async () => {
+  for (const state of ["sent", "received", "pending", "uncertain", "legacy"] as const) {
+    const f = await fixture();
+    process.env.PHOTON_ALLOWED_RECIPIENT = "+19736060558";
+    await mutateSession(f.ownerId, (document) => {
+      if (state === "legacy") document.uncertainDeliveries = [{ caseId: f.caseId, messageHash: "legacy-reservation", createdAt: new Date().toISOString() }];
+      else document.cases[0].messages.push({ id: state, sender: "tenant", body: "Historical message", recipient,
+        delivery: state, createdAt: new Date().toISOString() });
+    });
+    const before = await readSession(f.ownerId);
+    await assert.rejects(bindPhotonCase(), /live history cannot be rebound/);
+    assert.deepEqual(await readSession(f.ownerId), before);
+  }
+});
+
+test("formatting changes cannot bypass historical message deduplication or uncertain reservations", async () => {
+  const f = await fixture();
+  const approved = action();
+  await performCaseAction(f.ownerId, f.caseId, approved, f.dependencies);
+  await mutateSession(f.ownerId, (document) => {
+    document.cases[0].landlordContact = "+1 (212) 555-0100";
+    document.cases[0].messages.at(-1)!.recipient = "12125550100";
+  });
+  await performCaseAction(f.ownerId, f.caseId, { ...approved, requestId: randomUUID() }, f.dependencies);
+  assert.equal(f.calls(), 1);
+  await mutateSession(f.ownerId, (document) => { document.cases[0].messages.at(-1)!.delivery = "uncertain"; });
+  await assert.rejects(performCaseAction(f.ownerId, f.caseId, { ...approved, requestId: randomUUID() }, f.dependencies), /pending or uncertain/);
+  assert.equal(f.calls(), 1);
+});
+
+test("a formatted inbound sender still requires the exact approved conversation and line", async () => {
+  const f = await fixture();
+  await performCaseAction(f.ownerId, f.caseId, action(), f.dependencies);
+  const incoming = { id: "formatted-reply", conversationId: "conversation-1", sender: "+1 (212) 555-0100",
+    body: "A technician is scheduled tomorrow.", createdAt: new Date().toISOString(), sendingLine: line };
+  const result = await receiveLandlordMessage(f.ownerId, f.caseId, incoming);
+  assert.equal(result.case.messages.at(-1)?.recipient, recipient);
+  await assert.rejects(receiveLandlordMessage(f.ownerId, f.caseId, { ...incoming, id: "wrong-thread", conversationId: "other" }), /conversation/);
+  await assert.rejects(receiveLandlordMessage(f.ownerId, f.caseId, { ...incoming, id: "wrong-line", sendingLine: "+12125550999" }), /conversation/);
 });
 
 test("approved sends persist exact prepared content, receipt and timeline after the durable reservation", async () => {

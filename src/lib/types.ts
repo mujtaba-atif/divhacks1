@@ -248,6 +248,8 @@ export interface EscrowRecord {
 export interface CaseRecord {
   id: string;
   ownerId: string;
+  /** Demo participant details, separate from the authenticated workspace owner ID. */
+  tenant?: { name: string; phone: string };
   title: string;
   issue: IssueType;
   description: string;

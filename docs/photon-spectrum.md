@@ -30,6 +30,14 @@ Use the intended workspace's `case.ownerId` from its dashboard API response for
 the tenant binding, not a browser cookie or a randomly chosen ID. This prevents
 other anonymous sessions with the same seeded case number from sending.
 
+The RE-1042 seed and Reset demo use Mujtaba Atif (`+12018567033`) as the tenant
+and Rayyan Khan (`+19736060558`) as the landlord. Only the landlord contact is a
+message destination. Tenant contact details are not a Spectrum sending-line ID.
+US national/formatted phone numbers normalize to E.164 before validation and
+dispatch; email recipients remain supported. Empty or malformed contacts fail
+before contacting Spectrum. `photon:bind` also repairs these roles in an existing
+bound RE-1042 without replacing its evidence, financial state, or failed-send audit.
+
 ```sh
 pnpm photon:bind  # explicitly sets this existing case's test contact; no send
 pnpm photon:check # authenticated project read only; no send or listener
@@ -79,6 +87,9 @@ the app reports unavailable and does not silently simulate a successful send.
 - Message records contain provider, body, recipient, case, request UUID, attempt
   time, delivery state, provider IDs, line, receipt time, and sanitized failure.
   They use the existing MongoDB Atlas case storage when selected.
+- Server send-attempt diagnostics include case, tenant, landlord, raw/normalized
+  recipient, allowlisted recipient, and provider. These demo diagnostics contain
+  contact details; keep logs private. Secrets and message bodies are never logged.
 - An approved send is reserved durably before the provider is invoked. Replays
   of the request ID are idempotent. Pending/uncertain identical content is blocked,
   even under a fresh request ID; successful same-provider identical content is

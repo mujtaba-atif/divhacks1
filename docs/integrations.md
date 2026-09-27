@@ -116,7 +116,8 @@ remain explicitly demo data. No public unauthenticated webhook is exposed.
 The unwrapped SDK can share a provider contact card before application filtering.
 Our reply provider disables that behavior locally through a tested, version-pinned
 provider configuration wrapper, without changing cloud settings or token renewal.
-SDK telemetry is off and application logs omit credentials, contacts and bodies.
+SDK telemetry is off. Send-attempt diagnostics include demo participant/contact
+bindings, but never credentials or message bodies; keep server logs private.
 See [configuration, limitations, and walkthrough](photon-spectrum.md).
 
 ### Dependency setup

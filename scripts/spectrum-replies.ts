@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
+import { normalizeMessagingContact } from "../src/lib/messaging-contact";
 import { getPhotonConfig, type PhotonConfig } from "../src/lib/integrations/photon";
 import { withSpectrumTimeout } from "../src/lib/integrations/spectrum";
 import { withoutIMessageProfileSharing } from "../src/lib/integrations/spectrum-reply-provider";
@@ -89,7 +90,7 @@ export async function runSpectrumReplies(options: ReplyOptions = {}): Promise<nu
       const result = await nextOrAbort(iterator, options.signal);
       if (!result || result.done) break;
       const incoming = result.value;
-      if (!incoming || incoming.sender !== config.allowedRecipient
+      if (!incoming || normalizeMessagingContact(incoming.sender) !== config.allowedRecipient
         || (config.sendingLine && incoming.sendingLine !== config.sendingLine)) continue;
       try {
         await (options.receive ?? receiveLandlordMessage)(config.tenantId, config.caseId, incoming);
