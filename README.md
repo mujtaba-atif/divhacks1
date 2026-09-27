@@ -1,88 +1,75 @@
 <p align="center">
-  <img src="output/branding/rentescrow-logo-v2.png" alt="RentEscrow logo" width="180" />
+  <img src="https://divhacks1-production.up.railway.app/figma/door-brand.png" alt="RentEscrow logo" width="160" />
 </p>
 
 # RentEscrow
+**Document the problem. Coordinate the repair. Track the resolution.**
 
-- **Document the issue. Coordinate the repair. Keep rent accountable.**
-- Built for **Columbia DivHacks 2026**, September 26–27 at Columbia University.
-- **[Live application →](https://divhacks1-production.up.railway.app)**
+- Built at **Columbia DivHacks 2026**.
+- Helps tenants and landlords manage repair evidence, communication, and conditional settlement workflows.
+- **[Open RentEscrow](https://divhacks1-production.up.railway.app)**
 
-## What it does
+## The Problem
 
-- **Organizes repair disputes:** Keeps evidence, messages, expenses, building records, and repair progress in one case.
-- **Connects tenants and landlords:** Provides separate workspaces and iMessage agents for repair updates and scheduling.
-- **Analyzes evidence:** Uses Gemini to extract observations from photos and PDFs, supporting before-and-after repair review.
-- **Makes financial decisions traceable:** Combines signed agreement policies, account verification, payment limits, and recorded settlement results.
-- **Keeps records accessible:** Persists case history and lets tenants export a case dossier.
+- A broken sink can turn into weeks of unanswered messages and scattered photos.
+- RentEscrow brings repair requests, supporting evidence, and updates into one shared case.
 
-## DivHacks tracks
+<p align="center">
+  <img src="https://oxplumbing.com/assets/emergency-plumbing-08EYKHHM.webp" alt="Broken plumbing beneath a kitchen sink leaking water into the cabinet" width="480" />
+</p>
 
-- **Hack The City:** Makes NYC housing information actionable by connecting public building complaints and violations to tenant repair cases.
-- **Capital One — The Best Use of Nessie:** Verifies sandbox customer/account relationships and retrieves balances, rent history, and transactions for tenant review.
-- **Ripple — Best Agentic Finance Infrastructure on XRPL:** Supports autonomous Testnet settlement under signed agreement policies, with fixed destinations, spending limits, replay protection, and transaction verification.
-- **Photon — Agents in iMessage using Photon:** Uses Spectrum to connect tenant and landlord conversations with agents that interpret and relay repair updates.
-- **MLH — Best Use of Gemini API:** Produces structured evidence observations and interprets repair messages. Payment authority stays in server-side policy rules.
-- **MLH — Best Use of MongoDB Atlas:** Stores accounts, sessions, cases, agreements, audit records, and uploaded evidence through GridFS.
+*Illustrative repair image from [OX Plumbing](https://oxplumbing.com/).*
 
-## High-level system design
+## What It Does
+
+- **Tenant and landlord dashboards:** Manage cases and follow repair progress.
+- **Evidence uploads:** Keep photos, documents, and timestamps together.
+- **AI assistance:** Use Gemini to interpret uploaded evidence and summarize observations.
+- **iMessage coordination:** Exchange repair updates through a Photon Spectrum messaging agent.
+- **NYC housing context:** Surface public HPD complaint and violation records.
+- **Conditional settlements:** Connect signed agreements and application checks to XRPL Testnet payment workflows.
+
+## DivHacks Tracks & Integrations
+
+- **Hack The City — General track alignment:** Make housing repair information and coordination more accessible.
+- **Capital One — Best Use of Nessie:** Use sandbox banking data for account verification, balances, and rent history.
+- **Ripple — Best Agentic Finance Infrastructure on XRPL:** Support policy-controlled RLUSD settlement workflows on XRPL Testnet.
+- **Photon — Agents in iMessage:** Coordinate tenant and landlord repair conversations through iMessage.
+- **MLH — Best Use of Gemini API:** Analyze evidence and produce useful observations for case review.
+- **MLH — Best Use of MongoDB Atlas:** Persist accounts, sessions, cases, agreements, and audit records.
+
+## High-Level System Design
 
 ```mermaid
 flowchart TD
-    Users["Tenant and landlord dashboards"] --> Web
+    Users["Tenants & Landlords"] --> Web["Next.js Web App"]
+    Phones["iMessage"] <--> Photon["Photon Spectrum"]
+    Photon <--> Worker["Messaging Worker"]
 
-    subgraph Railway["Railway deployment"]
-        Web["Next.js web app"]
-        Worker["Messaging worker"]
-        Logic["Shared case logic and policy checks"]
-        Web --> Logic
-        Worker --> Logic
+    subgraph Railway["Railway"]
+        Web --> Backend["Application Logic & APIs"]
+        Worker --> Backend
     end
 
-    Phones["Tenant and landlord iMessage"] <--> Spectrum["Photon Spectrum"]
-    Spectrum <--> Worker
-
-    Logic <--> DB[("MongoDB Atlas + GridFS")]
-    Logic --> Gemini["Gemini: evidence and message analysis"]
-    Logic --> NYC["NYC Open Data: building history"]
-    Logic --> Nessie["Nessie: sandbox financial verification"]
-    Logic -->|Guarded settlement| XRPL["XRPL Testnet: RLUSD / XRP"]
+    Backend <--> DB["MongoDB + GridFS"]
+    Backend --> AI["Gemini Evidence Analysis"]
+    Backend --> NYC["NYC HPD Open Data"]
+    Backend --> Bank["Capital One Nessie Sandbox"]
+    Backend --> Rules["Agreement & Settlement Checks"]
+    Rules --> Ledger["XRPL Testnet"]
 ```
 
-- **Repair flow:** Report issue → upload evidence → coordinate repairs → review completion → evaluate settlement conditions.
-- **Payment controls:** Verify signed authority, case bindings, balances, destinations, and duplicate protection before signing a transaction.
-- **Messaging boundary:** Conversation agents coordinate repairs; they cannot replace approved wallets, amounts, or financial authority.
-
-## Tech stack
+## Tech Stack
 
 - **Frontend:** Next.js 16, React 19, TypeScript, custom CSS, and Lucide icons.
-- **Backend:** Node.js 22+, Next.js API routes, Zod validation, and role-based authentication.
-- **Storage:** MongoDB Atlas and GridFS.
-- **Integrations:** Gemini API, Spectrum SDK, Capital One Nessie, NYC Open Data, and `xrpl.js`.
-- **Deployment and testing:** Railway, pnpm, Node.js test runner, and Playwright.
+- **Backend:** Next.js server routes, Node.js, and Zod validation.
+- **Storage:** MongoDB for application records and GridFS for uploaded evidence.
+- **AI & messaging:** Gemini API and Photon Spectrum.
+- **Finance integrations:** Capital One Nessie and the XRPL JavaScript SDK.
+- **Deployment:** Railway web service and a separate messaging worker.
 
-## Demo evidence
+## Prototype Scope
 
-<p>
-  <img src="public/evidence-before.png" alt="Synthetic before-repair thermometer showing 54°F" width="260" />
-  <img src="public/evidence-after.png" alt="Synthetic after-repair thermometer showing 72°F" width="260" />
-</p>
-
-- Synthetic sample images demonstrate the **54°F → 72°F** repair comparison.
-- Sample results are labeled separately from live Gemini analysis.
-
-## Run locally
-
-- Install **Node.js 22+** and **pnpm 11.25.0**.
-- Run `pnpm install --frozen-lockfile`.
-- Use `.env.example` to configure an ignored `.env.local`, including MongoDB credentials.
-- Run `pnpm seed:users`, then `pnpm dev`.
-- Open `http://127.0.0.1:3000`.
-- For configured iMessage integration, run `pnpm agent` in a separate terminal.
-- Validate with `pnpm typecheck`, `pnpm test`, and `pnpm build`.
-
-## Prototype scope
-
-- Application USD escrow is simulated; Nessie provides mock banking data.
-- XRPL settlement uses Testnet tokens with no monetary value.
-- AI observations support review. Signed policies and deterministic server checks govern settlement.
+- Built as a hackathon prototype using banking sandbox data and XRPL Testnet.
+- In-app USD escrow balances are simulated.
+- AI observations support review; settlement decisions follow application rules and signed agreement permissions.
