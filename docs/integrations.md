@@ -116,6 +116,37 @@ backend records uncertainty and temporarily blocks an identical retry. Incoming
 landlord replies remain explicitly simulated; no unauthenticated
 webhook is treated as proof that a landlord completed a repair.
 
+### Spectrum worker
+
+`pnpm agent` starts the standalone `scripts/spectrum-agent.ts` worker using
+the installed `spectrum-ts` SDK. Put `SPECTRUM_PROJECT_ID` and
+`SPECTRUM_PROJECT_SECRET` in ignored `.env.local`, or supply them as environment
+variables. This is not a proxy token and does not enable the app's Photon adapter.
+
+Starting the worker explicitly enables real replies to new inbound iMessage
+text, including group conversations. Use a dedicated test project with consenting
+participants. It does not register a webhook, update Atlas, or authorize any
+repair or financial state. Provider-side profile/contact-card sharing may also
+occur when enabled in the Spectrum project; disable that setting in the provider
+dashboard when it is not wanted.
+
+The worker excludes outgoing messages and pre-start history, remembers handled
+message IDs for the process lifetime, and does not retry an uncertain send.
+Stop and inspect delivery after a send failure before restarting. Application
+logs omit message bodies and sender addresses, and SDK telemetry is disabled.
+Ctrl+C shuts down the SDK. Automated tests inject a fake client and never start
+a live listener or send iMessages.
+
+### Dependency setup
+
+Use the pinned pnpm version and `pnpm install --frozen-lockfile`. The workspace
+explicitly permits the existing esbuild/sharp installers and skips protobufjs's
+advisory-only postinstall. A narrow override patches Spectrum's transitive
+OpenTelemetry core dependency for
+[GHSA-8988-4f7v-96qf](https://github.com/advisories/GHSA-8988-4f7v-96qf).
+Keep the override until upstream dependency resolution no longer includes the
+affected release; do not remove it without rerunning `pnpm audit` and the tests.
+
 ## XRP Ledger Testnet
 
 ### Application settlement

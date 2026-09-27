@@ -7,10 +7,10 @@ case-bound XRPL Testnet Payment provides real on-chain settlement using Test XRP
 
 ## Run locally
 
-Requires Node.js 22+ and pnpm. No API keys are required for the demo.
+Requires Node.js 22+ and pnpm 11.25.0 (pinned in `package.json`). No API keys are required for the demo.
 
 ```sh
-pnpm install
+pnpm install --frozen-lockfile
 pnpm dev
 ```
 
@@ -49,8 +49,22 @@ limitations.
 | Gemini | Server-side structured evidence analysis and before/after comparison when configured |
 | Nessie | Verified sandbox customer/account binding, rent history, tenant-reviewed costs, and account-substitution guardrail |
 | Photon | Opt-in approved-recipient outbound iMessage; demo replies by default |
+| Spectrum | Separate opt-in live iMessage echo worker (`pnpm agent`); not connected to case records |
 | MongoDB Atlas | Session records and GridFS uploads when configured; local atomic JSON persistence by default |
 | XRPL | Guarded real Testnet Payment settlement; application escrow remains simulated USD |
+
+## Spectrum iMessage worker
+
+Set `SPECTRUM_PROJECT_ID` and `SPECTRUM_PROJECT_SECRET` in ignored `.env.local`,
+then run `pnpm agent` in a separate terminal. This is a **live** worker: it
+replies to newly received iMessage text in the originating conversation,
+including group conversations. Only start it on a dedicated test project whose
+participants expect automated replies. Stop it with Ctrl+C.
+
+These credentials are distinct from `PHOTON_PROXY_TOKEN`. The worker does not
+update cases, classify landlord replies, or persist messages to Atlas. The app's
+approved-recipient Photon HTTP adapter remains unchanged. See
+[Spectrum limitations](docs/integrations.md#spectrum-worker) before running it.
 
 ## XRP Testnet demo
 

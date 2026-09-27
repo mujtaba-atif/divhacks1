@@ -1,4 +1,12 @@
 packages:
   - .
+
 allowBuilds:
   esbuild: true
+  sharp: true
+  # This postinstall only prints version-range advice; no runtime files are built.
+  protobufjs: false
+
+overrides:
+  # GHSA-8988-4f7v-96qf; keep vulnerable transitive 2.x releases off the lockfile.
+  '@opentelemetry/core@<2.8.0': 2.11.0
