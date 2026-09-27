@@ -983,8 +983,8 @@ async function applyAction(
       // Refresh trusted customer/account ownership at the last server boundary before policy and signing.
       // The adapter rechecks the resulting immutable snapshot immediately before it signs.
       await refreshFinancialProfile(caseRecord);
-      // Autonomous settlement requires live financial verification, even in an otherwise explicit demo workspace.
-      if (settlementActor === "settlement_agent") caseRecord.financialPolicyContext = nessiePolicyContext(caseRecord);
+      // Legacy agent approval requires live verification; signed contracts retain their configured financial binding.
+      if (settlementActor === "settlement_agent" && !caseRecord.contractId) caseRecord.financialPolicyContext = nessiePolicyContext(caseRecord);
     }
     return withXrplWalletLock(settlement.source, async () => {
       const journal = await readXrplJournal(settlement);
