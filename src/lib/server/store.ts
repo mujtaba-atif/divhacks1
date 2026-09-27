@@ -41,12 +41,36 @@ function filename(ownerId: string) {
   return path.join(dataDirectory, `${digest}.json`);
 }
 
+function normalizeEvidenceVerification(document: SessionDocument | null): SessionDocument | null {
+  if (!document) return null;
+  for (const record of document.cases) {
+    // Old Gemini comparisons contained a model-provided verified flag. They must
+    // be reviewed under the application rule before any new authorization.
+    // Completed/pending payments retain their receipts and reconciliation state.
+    if (record.status === "resolved" || record.escrow.status === "released"
+      || record.xrplSettlement?.status === "pending" || record.xrplSettlement?.status === "validated"
+      || record.verification?.source !== "gemini") continue;
+    const comparison = record.verification.comparison;
+    const before = record.evidence.filter((item) => item.stage === "before").at(-1);
+    const after = record.evidence.filter((item) => item.stage === "after").at(-1);
+    if (comparison?.rule === "heating-evidence-v1"
+      && comparison.passed === record.verification.verified
+      && comparison.beforeEvidenceId === before?.id && comparison.afterEvidenceId === after?.id) continue;
+    delete record.verification;
+    record.tenantConfirmed = false;
+    for (const evidence of record.evidence) if (evidence.analysis) evidence.analysis.verified = false;
+    record.status = record.repairReported ? "verification"
+      : record.messages.length || record.escrow.status === "locked" ? "awaiting_repair" : "open";
+  }
+  return document;
+}
+
 export async function readSession(ownerId: string): Promise<SessionDocument | null> {
   if (mongoEnabled()) {
-    return readMongoSession(ownerId);
+    return normalizeEvidenceVerification(await readMongoSession(ownerId));
   }
   try {
-    return JSON.parse(await readFile(filename(ownerId), "utf8")) as SessionDocument;
+    return normalizeEvidenceVerification(JSON.parse(await readFile(filename(ownerId), "utf8")) as SessionDocument);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;

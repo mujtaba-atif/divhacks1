@@ -58,7 +58,11 @@ test("Gemini enforces structured output and single-image analysis cannot verify 
     assert.equal(url.includes("test-key-not-real"), false);
     const body = JSON.parse(String(options.body));
     assert.equal(body.generationConfig.responseMimeType, "application/json");
-    return Response.json({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: malformed ? "{\"verified\":true}" : JSON.stringify({ summary: "A room thermometer is visible.", severity: "low", temperatureF: 72, verified: true, reasons: ["Visible image reading."] }) }] } }] });
+    return Response.json({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: malformed ? "{\"issueType\":\"heating\"}" : JSON.stringify({
+      issueType: "heating", observations: ["A room thermometer appears to display 72 F."], evidenceType: "thermometer_photo",
+      summary: "A room thermometer appears to be visible.", severity: "low", temperatureF: 72,
+      confidence: 0.95, requiresHumanConfirmation: true,
+    }) }] } }] });
   });
   assert.equal((await analyzeEvidence(upload, record)).verified, false);
   malformed = true;

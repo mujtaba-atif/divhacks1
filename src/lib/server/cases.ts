@@ -71,7 +71,29 @@ function updateStatus(caseRecord: CaseRecord) {
 function invalidateVerification(caseRecord: CaseRecord) {
   delete caseRecord.verification;
   caseRecord.tenantConfirmed = false;
+  for (const evidence of caseRecord.evidence) {
+    if (evidence.analysis) evidence.analysis.verified = false;
+  }
   updateStatus(caseRecord);
+}
+
+async function analyzeAndRecordEvidence(caseRecord: CaseRecord, evidence: EvidenceRecord): Promise<IntegrationError | undefined> {
+  invalidateVerification(caseRecord);
+  try {
+    // Only the adapter's validated analysis is assigned; never merge model data into a case.
+    evidence.analysis = await analyzeEvidence(evidence, caseRecord);
+    delete evidence.analysisError;
+    event(caseRecord, evidence.isDemo ? "Sample evidence analyzed" : "Gemini AI analysis recorded", evidence.analysis.summary, "evidence");
+  } catch (error) {
+    if (!(error instanceof IntegrationError)) throw error;
+    delete evidence.analysis;
+    evidence.analysisError = {
+      message: error.message, code: error.code,
+      retryable: error.code !== "invalid_input", attemptedAt: now(),
+    };
+    event(caseRecord, "Evidence analysis unavailable", "The upload is saved and remains unverified. Review the analysis error before retrying.", "evidence");
+    return error;
+  }
 }
 
 const REPLY_EVENT_TITLES: Record<LandlordReplyIntent, string> = {
@@ -355,7 +377,7 @@ export async function createContractCase(
 }
 
 export async function addUploadedEvidence(ownerId: string, caseId: string, evidence: EvidenceRecord) {
-  return mutateSession(ownerId, async (document) => {
+  return mutateSession(ownerId, async (document, mutation) => {
     const caseRecord = findCase(document, caseId);
     await assertNoPendingSettlement(caseRecord);
     assertMutable(caseRecord);
@@ -363,6 +385,9 @@ export async function addUploadedEvidence(ownerId: string, caseId: string, evide
     caseRecord.evidence.push(evidence);
     invalidateVerification(caseRecord);
     event(caseRecord, "Evidence uploaded", `${evidence.name} added as ${evidence.stage} evidence.`, "evidence");
+    // Keep the upload even if the provider times out or the request is interrupted.
+    await mutation.checkpoint();
+    await analyzeAndRecordEvidence(caseRecord, evidence);
     return caseRecord;
   });
 }
@@ -534,11 +559,9 @@ async function applyAction(
     case "analyze_evidence": {
       const evidence = caseRecord.evidence.find((item) => item.id === action.evidenceId);
       if (!evidence) throw new ApiError(404, "Evidence not found in this case.");
-      if (evidence.analysis) return { case: caseRecord };
-      const analysis = await analyzeEvidence(evidence, caseRecord);
-      evidence.analysis = analysis;
-      invalidateVerification(caseRecord);
-      event(caseRecord, "Evidence analyzed", analysis.summary, "evidence");
+      if (evidence.analysis && (evidence.isDemo || evidence.analysis.requiresHumanConfirmation)) return { case: caseRecord };
+      const error = await analyzeAndRecordEvidence(caseRecord, evidence);
+      if (error) throw new ApiError(error.code === "invalid_input" ? 400 : 502, error.message, true, `GEMINI_${error.code.toUpperCase()}`, undefined, caseRecord);
       break;
     }
     case "send_message": {
@@ -621,7 +644,9 @@ async function applyAction(
       if (caseRecord.verification?.verified) return { case: caseRecord };
       const verification = await verifyEvidence(caseRecord);
       caseRecord.verification = verification;
-      afterEvidence.analysis = verification;
+      // Preserve the upload's observations and provenance. Existing policy consumes
+      // this flag, whose value now comes exclusively from the application comparison.
+      afterEvidence.analysis.verified = verification.verified;
       caseRecord.tenantConfirmed = false;
       updateStatus(caseRecord);
       event(caseRecord, verification.verified ? "Repair evidence verified" : "Repair needs more evidence", verification.summary, "verification");

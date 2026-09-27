@@ -29,29 +29,54 @@ labeled demonstration fixture. Arbitrary addresses never inherit sample counts.
 ## Gemini
 
 `GEMINI_API_KEY` enables real image/PDF analysis. `GEMINI_MODEL` defaults to
-`gemini-2.5-flash` and may be set to another compatible model available to the
+`gemini-3.8-flash` and may be set to another compatible model available to the
 account. Calls use Google's documented
 [generateContent REST API](https://ai.google.dev/api/generate-content), including
 `inlineData` and structured JSON output. Responses must complete with `STOP` and
 pass a strict runtime schema. A refusal, timeout, malformed JSON, or invalid
 schema cannot become a successful verification.
 
-Before and after uploads are compared together. An individual upload always has
-`verified: false`; a passing comparison still requires the tenant's confirmation
-and deterministic escrow policy. Notes, OCR text, PDFs, and image content are
-untrusted evidence and cannot supply payment instructions. The model does not
-prove identity, authenticity, code compliance, or safety.
+Uploads are saved before the server requests analysis. The response contains
+`issueType`, `observations`, `temperatureF` (null when unreadable), `evidenceType`,
+`summary`, `confidence` (0–1), `severity`, and `requiresHumanConfirmation: true`.
+The server adds the source, model and analysis timestamp. Unknown fields and
+model-provided authorization/verification fields are rejected. A single upload
+always starts with `verified: false`.
+
+**Verify repair** compares the latest persisted before/after readings using an
+application rule, without another model request. For live heating evidence,
+both analyses must identify thermometer photos and heating with confidence at
+least 0.8. The before reading must be below 68°F and the improved after reading
+must be 68–85°F. This conservative demonstration rule is **not a legal temperature
+standard or a safety finding**. Other issues, unreadable readings, low confidence,
+and mixed live/sample evidence cannot pass this automatic comparison. The
+comparison records both evidence IDs and readings while preserving each upload's
+original observations. New evidence clears the comparison and tenant confirmation.
+
+A passing comparison still requires the tenant's explicit confirmation and the
+existing deterministic escrow policy; release remains a separate approved action.
+Notes, OCR text, PDFs, and image content are untrusted evidence and cannot supply
+application commands. The model receives no financial state, payment tools, or
+authorization capabilities. It cannot prove identity, authenticity, code compliance,
+or safety. XRPL and Nessie adapters and payment policy are unchanged.
 
 The supported media types are PNG, JPEG, WebP, and PDF, up to 5 MiB each. The
-comparison sends the latest analyzed before and after evidence, with only the
-case issue/description and evidence metadata. Names, banking data, wallet seeds,
-and unrelated evidence are not part of the request. Adding a key means selected
-uploaded evidence is sent to Google when the tenant requests analysis.
+analysis sends the uploaded file, case issue/description and evidence metadata.
+Banking data, wallet seeds, and unrelated evidence are not part of the request.
+Adding a key means uploaded evidence is sent to Google automatically on upload
+and when retrying analysis. See Google's [image input](https://ai.google.dev/gemini-api/docs/image-understanding),
+[PDF input](https://ai.google.dev/gemini-api/docs/document-processing), and
+[structured output](https://ai.google.dev/gemini-api/docs/structured-output) documentation.
 
 Without a key, only server-labeled `isDemo` sample evidence receives deterministic
 analysis. The heating sample changes from 54 F to 72 F. Real uploads return an
-unavailable error and remain unverified. Mixing sample and real evidence for
-repair verification is rejected.
+persist an unavailable error and remain unverified. Transient network, timeout,
+HTTP 429 and server failures receive one bounded retry. Invalid credentials,
+malformed output and blocked responses do not become sample analysis. The
+Evidence tab retains the file and offers manual retry after fixing configuration
+or availability. Mixing sample and real evidence for repair verification is rejected.
+
+See [real-image testing and judge walkthrough](gemini-demo.md).
 
 ## Capital One Nessie
 

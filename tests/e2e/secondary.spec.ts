@@ -72,14 +72,15 @@ test("an uploaded PNG remains real and unverified without Gemini credentials", a
   const card = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "tenant-upload.png", exact: true }) });
   await expect(card).toBeVisible();
   await expect.poll(() => card.locator("img").evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
-  await card.getByRole("button", { name: "Analyze evidence", exact: true }).click();
-  await expect(page.getByRole("alert").filter({ hasText: "Gemini is not configured" })).toBeVisible();
-  await expect(card.getByRole("button", { name: "Analyze evidence", exact: true })).toBeEnabled();
+  await expect(card.getByRole("alert").filter({ hasText: "Gemini is not configured" })).toBeVisible();
+  await expect(card.getByRole("button", { name: "Retry AI analysis", exact: true })).toBeEnabled();
+  await expect(card.getByText("54°F tenant-reported", { exact: true })).toBeVisible();
   await expect(card.getByText("Verification evidence passed", { exact: true })).toHaveCount(0);
   const data = await (await page.request.get("/api/dashboard")).json() as DashboardData;
   const uploaded = data.cases[0].evidence.find((item) => item.name === "tenant-upload.png");
   expect(uploaded?.isDemo).toBe(false);
   expect(uploaded?.analysis).toBeUndefined();
+  expect(uploaded?.analysisError?.code).toBe("unavailable");
   expect(data.cases[0].verification?.verified).not.toBe(true);
   expect(data.cases[0].tenantConfirmed).toBe(false);
 });

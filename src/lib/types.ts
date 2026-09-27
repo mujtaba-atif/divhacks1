@@ -29,6 +29,23 @@ export interface EvidenceAnalysis {
   verified: boolean;
   reasons: string[];
   source: "demo" | "gemini";
+  /** Optional for records saved before structured Gemini analysis was introduced. */
+  issueType?: IssueType;
+  observations?: string[];
+  evidenceType?: "thermometer_photo" | "condition_photo" | "document" | "other";
+  confidence?: number;
+  requiresHumanConfirmation?: true;
+  model?: string;
+  analyzedAt?: string;
+  /** Application-generated comparison, never a model-provided authorization. */
+  comparison?: {
+    beforeEvidenceId: string;
+    afterEvidenceId: string;
+    beforeTemperatureF?: number;
+    afterTemperatureF?: number;
+    rule: "heating-evidence-v1" | "demo-heating-v1";
+    passed: boolean;
+  };
 }
 
 export interface EvidenceRecord {
@@ -42,6 +59,12 @@ export interface EvidenceRecord {
   temperatureF?: number;
   isDemo: boolean;
   analysis?: EvidenceAnalysis;
+  analysisError?: {
+    message: string;
+    code: string;
+    retryable: boolean;
+    attemptedAt: string;
+  };
 }
 
 export type LandlordReplyIntent = "scheduled" | "repair_complete" | "question" | "refusal" | "other";
