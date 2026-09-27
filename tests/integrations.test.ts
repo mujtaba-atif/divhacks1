@@ -74,16 +74,22 @@ test("NYC lookup maps actual records and preserves partial unavailability", asyn
   t.mock.method(globalThis, "fetch", async (input: URL) => {
     calls++;
     const url = new URL(input);
-    assert.match(url.searchParams.get("$where") ?? "", /O''CONNOR STREET/);
-    if (url.pathname.includes("ygpa-z7cr")) return Response.json([{ unique_key: "p1", complaint_id: "c1", received_date: "2026-09-01", major_category: "HEAT/HOT WATER", problem_code: "NO HEAT", complaint_status: "OPEN", post_code: "11201" }]);
+    if (url.pathname.includes("kj4p-ruqc")) {
+      assert.match(url.searchParams.get("$where") ?? "", /O''CONNOR STREET/);
+      return Response.json([{ buildingid: "321", boro: "BROOKLYN", housenumber: "321", streetname: "O'CONNOR STREET", zip: "11201", block: "1", lot: "2", bin: "3000321", lifecycle: "Building", recordstatus: "Active" }]);
+    }
+    assert.match(url.searchParams.get("$where") ?? "", /321/);
+    if (url.pathname.includes("ygpa-z7cr")) return Response.json([{ problem_id: "1", complaint_id: "11", building_id: "321", received_date: "2026-09-01", major_category: "HEAT/HOT WATER", problem_code: "NO HEAT", complaint_status: "OPEN", post_code: "11201" }]);
     return new Response("Unavailable", { status: 503 });
   });
   assert.equal((await lookupBuilding("123 Example Street", "Brooklyn")).source, "demo");
   assert.equal(calls, 0);
   const record = await lookupBuilding("321 O'Connor Street", "Brooklyn");
   assert.equal(record.source, "nyc-open-data");
+  assert.equal(record.lookupStatus, "partial");
+  assert.equal(record.buildingId, "hpd:321");
   assert.equal(record.complaints.length, 1);
-  assert.equal(record.complaints[0].id, "p1");
+  assert.equal(record.complaints[0].id, "11");
   assert.equal(record.violations.length, 0);
   assert.match(record.warning ?? "", /Violation records are currently unavailable/);
   assert.equal(record.zip, "11201");

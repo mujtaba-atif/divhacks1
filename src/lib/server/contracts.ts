@@ -6,7 +6,7 @@ import type { CaseType } from "@/lib/types";
 import { createContractCase } from "./cases";
 import { getRegisteredUser } from "./auth";
 import { ApiError } from "./errors";
-import { mutateSession, readSession } from "./store";
+import { mutateSession, readSession, type SessionDocument } from "./store";
 
 export interface ContractAcceptance {
   role: "tenant" | "landlord";
@@ -71,9 +71,20 @@ function active(contract: DigitalContract) {
     : ["tenant", "landlord"].every((role) => contract.acceptances.some((acceptance) => acceptance.role === role));
 }
 
+function contractUser(document: SessionDocument, role: "tenant" | "landlord") {
+  if (document.tenantUserId) {
+    if (role !== "tenant") throw new ApiError(403, "A tenant cannot accept as a property manager.", false, "ROLE_NOT_ALLOWED");
+    return { id: document.tenantUserId };
+  }
+  return getRegisteredUser(document, role);
+}
+
 export async function createContract(ownerId: string, input: z.infer<typeof contractSchema>) {
   return mutateSession(ownerId, (document) => {
-    const tenant = getRegisteredUser(document, "tenant");
+    if (document.tenantUserId && input.case_type === "bilateral") {
+      throw new ApiError(409, "Bilateral contract signing is not available in this demo. Open a repair case or a self-documentation contract instead.", false, "BILATERAL_CONTRACT_UNAVAILABLE");
+    }
+    const tenant = contractUser(document, "tenant");
     const createdAt = new Date().toISOString();
     const termsHash = hashTerms(input.case_type, input.terms);
     const contract: DigitalContract = {
@@ -90,7 +101,7 @@ export async function createContract(ownerId: string, input: z.infer<typeof cont
 
 export async function acceptContract(ownerId: string, contractId: string, role: "tenant" | "landlord") {
   return mutateSession(ownerId, (document) => {
-    const user = getRegisteredUser(document, role);
+    const user = contractUser(document, role);
     const contract = document.contracts?.find((item) => item.id === contractId);
     if (!contract) throw new ApiError(404, "Contract not found in this demo session.");
     if (contract.status === "used") throw new ApiError(409, "This contract has already created a case.");

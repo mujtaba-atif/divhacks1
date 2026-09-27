@@ -1,15 +1,17 @@
 import "server-only";
 
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, open, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createDemoCase } from "@/lib/seed";
-import type { CaseRecord } from "@/lib/types";
+import type { AuthUser, CaseRecord } from "@/lib/types";
 import type { RegisteredUser } from "./auth";
 import type { DigitalContract } from "./contracts";
 import { ApiError } from "./errors";
 import { readXrplJournal } from "./xrpl-journal";
 import { assertSessionSize, readMongoSession, saveMongoSession } from "./mongodb-store";
+import { getMongoDatabase, mongoStorageEnabled } from "./mongodb";
+import { acquireMongoLock } from "./mongodb-lock";
 
 export interface SessionDocument {
   ownerId: string;
@@ -23,6 +25,12 @@ export interface SessionDocument {
   /** Optional so existing anonymous demo sessions retain their original shape. */
   users?: RegisteredUser[];
   contracts?: DigitalContract[];
+  tenantUserId?: string;
+  tenantDisplayName?: string;
+  demoAccount?: "tenant1" | "tenant2";
+  /** Server-seeded signer binding. Browser input can never grant this authority. */
+  xrplAuthorized?: true;
+  managedProperty?: { id: string; address: string; borough: string; landlordUserId: string };
 }
 
 const sharedRuntime = globalThis as typeof globalThis & { rentEscrowLocks?: Map<string, Promise<void>> };
@@ -31,9 +39,7 @@ const dataDirectory = path.join(process.cwd(), ".data", "sessions");
 const lockDirectory = path.join(process.cwd(), ".data", "locks");
 
 function mongoEnabled() {
-  const mode = process.env.RENTESCROW_STORAGE || "local";
-  if (mode !== "local" && mode !== "mongodb") throw new ApiError(503, "RENTESCROW_STORAGE must be local or mongodb.");
-  return mode === "mongodb";
+  return mongoStorageEnabled();
 }
 
 function filename(ownerId: string) {
@@ -114,6 +120,71 @@ function seedSession(ownerId: string): SessionDocument {
   };
 }
 
+/** Bind authority from the persisted workspace, never from a request body. */
+export function assignCaseOwnership(document: SessionDocument, record: CaseRecord): void {
+  if (!document.tenantUserId) return; // Legacy fixtures used by provider/domain tests.
+  record.tenantUserId = document.tenantUserId;
+  record.tenantDisplayName = document.tenantDisplayName;
+  const normalized = (value: string) => value.trim().toLowerCase().replace(/\s+/g, " ");
+  const property = document.managedProperty;
+  const matches = property && normalized(record.building.address) === normalized(property.address)
+    && normalized(record.building.borough) === normalized(property.borough);
+  record.propertyId = matches ? property.id : `property-${createHash("sha256")
+    .update(`${normalized(record.building.address)}|${normalized(record.building.borough)}`).digest("hex").slice(0, 24)}`;
+  if (matches) record.landlordUserId = property.landlordUserId;
+  else delete record.landlordUserId;
+  record.repairs ??= [];
+}
+
+/** Idempotent seed: never replace an existing user's case or financial history. */
+export async function initializeUserWorkspace(user: AuthUser, landlordUserId: string): Promise<void> {
+  if (user.role !== "tenant") return;
+  const existing = await readMongoSession(user.workspaceOwnerId);
+  if (existing) {
+    if (existing.tenantUserId !== user.id) {
+      throw new ApiError(409, "The existing workspace belongs to a different user.", false, "CASE_ACCESS_DENIED");
+    }
+    const shouldAuthorizeXrpl = user.email === "tenant1@rentescrow.demo";
+    if (shouldAuthorizeXrpl !== (existing.xrplAuthorized === true)) {
+      const expectedRevision = existing.revision;
+      if (shouldAuthorizeXrpl) existing.xrplAuthorized = true;
+      else delete existing.xrplAuthorized;
+      existing.revision = expectedRevision + 1;
+      await saveMongoSession(existing, expectedRevision);
+    }
+    return;
+  }
+  const document = seedSession(user.workspaceOwnerId);
+  document.tenantUserId = user.id;
+  document.tenantDisplayName = user.displayName;
+  document.demoAccount = user.email === "tenant1@rentescrow.demo" ? "tenant1" : "tenant2";
+  if (document.demoAccount === "tenant1") document.xrplAuthorized = true;
+  document.managedProperty = { id: "demo-123-example", address: "123 Example Street", borough: "Brooklyn", landlordUserId };
+  if (document.demoAccount === "tenant2") document.cases = [];
+  for (const record of document.cases) assignCaseOwnership(document, record);
+  await saveMongoSession(document);
+}
+
+/** Find candidate aggregates by assignment; callers must re-check each case after loading. */
+export async function assignedWorkspaceOwners(landlordUserId: string): Promise<string[]> {
+  if (mongoEnabled()) {
+    const database = await getMongoDatabase();
+    const documents = await database.collection<SessionDocument>("sessions")
+      .find({ "cases.landlordUserId": landlordUserId }, { projection: { ownerId: 1 } }).toArray();
+    return documents.map((document) => document.ownerId);
+  }
+  let entries: string[];
+  try { entries = await readdir(dataDirectory); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  const owners: string[] = [];
+  for (const entry of entries) {
+    if (!/^[a-f0-9]{64}\.json$/.test(entry)) continue;
+    const document = JSON.parse(await readFile(path.join(dataDirectory, entry), "utf8")) as SessionDocument;
+    if (document.cases.some((record) => record.landlordUserId === landlordUserId)) owners.push(document.ownerId);
+  }
+  return owners;
+}
+
 export async function createSession() {
   const token = randomBytes(32).toString("hex");
   const ownerId = ownerIdFromToken(token);
@@ -170,13 +241,15 @@ async function serialize<T>(kind: "session" | "wallet", key: string, operation: 
   const current = new Promise<void>((resolve) => { release = resolve; });
   runtimeLocks.set(runtimeKey, current);
   await previous;
-  let releaseFile: (() => Promise<void>) | undefined;
+  let releaseStorageLock: (() => Promise<void>) | undefined;
   try {
-    if (!mongoEnabled()) releaseFile = await acquireFileLock(kind, key);
+    releaseStorageLock = mongoEnabled()
+      ? await acquireMongoLock(kind, key)
+      : await acquireFileLock(kind, key);
     return await operation();
   } finally {
     try {
-      await releaseFile?.();
+      await releaseStorageLock?.();
     } finally {
       release();
       if (runtimeLocks.get(runtimeKey) === current) runtimeLocks.delete(runtimeKey);
@@ -195,7 +268,7 @@ export async function mutateSession<T>(
 ): Promise<T> {
   return serialize("session", ownerId, async () => {
     const document = await readSession(ownerId);
-    if (!document) throw new ApiError(401, "Your demo session expired. Reload the page to start again.");
+    if (!document) throw new ApiError(401, "Your workspace is unavailable. Sign in again or ask an operator to check the account seed.");
     let expectedRevision = document.revision;
     const checkpoint = async () => {
       document.revision = expectedRevision + 1;
@@ -216,11 +289,9 @@ export async function mutateSession<T>(
 }
 
 export function assertXrplStorageCapability(): void {
-  if (mongoEnabled()) {
-    throw new ApiError(503,
-      "Live XRPL settlement is disabled with MongoDB session storage until a shared distributed wallet lock is configured. Use local storage for this single-host demo.",
-      false, "XRPL_DISTRIBUTED_LOCK_REQUIRED");
-  }
+  // Validates the configured storage mode. Both local filesystem locking and
+  // MongoDB non-expiring distributed locks preserve the settlement boundary.
+  mongoEnabled();
 }
 
 /** Lock order is always session first, then wallet. Call only from mutateSession. */
@@ -234,7 +305,7 @@ export async function resetSession(ownerId: string) {
     if (document.uncertainDeliveries?.length || document.cases.some((item) => item.messages.some((message) =>
       (message.provider === "spectrum" || message.provider === "photon" || message.provider === undefined)
       && ["sent", "received", "pending", "uncertain"].includes(message.delivery)))) {
-      throw new ApiError(409, "This session contains live messaging records and cannot be reset. Start a new browser session to preserve delivery and reply history.", false, "MESSAGE_HISTORY_PRESERVED");
+      throw new ApiError(409, "This workspace contains live messaging records and cannot be reset. Create another case to preserve delivery and reply history.", false, "MESSAGE_HISTORY_PRESERVED");
     }
     for (const item of document.cases) {
       const journal = item.xrplSettlement ? await readXrplJournal(item.xrplSettlement) : null;
@@ -253,9 +324,11 @@ export async function resetSession(ownerId: string) {
       }
     }
     if (document.cases.some((item) => item.xrplSettlement?.status === "validated")) {
-      throw new ApiError(409, "This session contains a validated on-chain receipt and cannot be reset. Start a new browser session to preserve its audit record.", false, "SETTLEMENT_ALREADY_COMPLETED");
+      throw new ApiError(409, "This workspace contains a validated on-chain receipt and cannot be reset. Create another case to preserve its audit record.", false, "SETTLEMENT_ALREADY_COMPLETED");
     }
     const fresh = seedSession(ownerId);
+    if (document.demoAccount === "tenant2") fresh.cases = [];
+    for (const record of fresh.cases) assignCaseOwnership(document, record);
     document.cases = fresh.cases;
     document.accountBalanceCents = fresh.accountBalanceCents;
     document.simulatedDebitsCents = fresh.simulatedDebitsCents;
@@ -267,8 +340,10 @@ export async function resetSession(ownerId: string) {
 }
 
 export function findCase(document: SessionDocument, caseId: string) {
-  const caseRecord = document.cases.find((item) => item.id === caseId && item.ownerId === document.ownerId);
-  if (!caseRecord) throw new ApiError(404, "Case not found in this demo session.");
+  const caseRecord = document.cases.find((item) => item.id === caseId && item.ownerId === document.ownerId
+    && (!document.tenantUserId || item.tenantUserId === document.tenantUserId));
+  if (!caseRecord) throw new ApiError(document.tenantUserId ? 403 : 404,
+    document.tenantUserId ? "Case access denied." : "Case not found in this demo session.", false, "CASE_ACCESS_DENIED");
   return caseRecord;
 }
 

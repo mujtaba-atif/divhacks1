@@ -3,25 +3,31 @@ import "server-only";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { IntegrationError } from "@/lib/integrations";
-import { createSession, ownerIdFromToken, readSession, type SessionDocument } from "./store";
+import type { AuthUser } from "@/lib/types";
+import { AUTH_COOKIE_NAME, AUTH_SESSION_SECONDS, requireTenant } from "./auth";
+import { readSession, type SessionDocument } from "./store";
 import { ApiError } from "./errors";
 
-const COOKIE_NAME = "rentescrow_session";
-
 export interface SessionContext {
+  user: AuthUser;
   document: SessionDocument;
-  isNew: boolean;
-  token?: string;
+  isNew: false;
 }
 
 export async function getSession(request: NextRequest): Promise<SessionContext> {
-  const token = request.cookies.get(COOKIE_NAME)?.value;
-  if (token && /^[a-f0-9]{64}$/.test(token)) {
-    const document = await readSession(ownerIdFromToken(token));
-    if (document) return { document, isNew: false };
+  const user = await requireTenant(request);
+  const document = await readSession(user.workspaceOwnerId);
+  if (!document) {
+    throw new ApiError(503, "Your tenant workspace is unavailable. Ask an operator to run the user seed.", false,
+      "WORKSPACE_UNAVAILABLE");
   }
-  const created = await createSession();
-  return { ...created, isNew: true };
+  const invalidOwnership = document.ownerId !== user.workspaceOwnerId
+    || document.tenantUserId !== user.id
+    || document.cases.some((record) => record.ownerId !== user.workspaceOwnerId || record.tenantUserId !== user.id);
+  if (invalidOwnership) {
+    throw new ApiError(403, "Case access denied.", false, "CASE_ACCESS_DENIED");
+  }
+  return { user, document, isNew: false };
 }
 
 export function assertSameOrigin(request: NextRequest) {
@@ -46,16 +52,29 @@ export function respond(data: unknown, session?: SessionContext, status = 200) {
   const response = NextResponse.json(data, { status });
   response.headers.set("Cache-Control", "no-store, private");
   response.headers.set("X-Content-Type-Options", "nosniff");
-  if (session?.isNew && session.token) {
-    response.cookies.set(COOKIE_NAME, session.token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 30,
-    });
-  }
   return response;
+}
+
+export function setAuthSessionCookie(response: NextResponse, token: string, expiresAt: Date): void {
+  response.cookies.set(AUTH_COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    path: "/",
+    maxAge: AUTH_SESSION_SECONDS,
+    expires: expiresAt,
+  });
+}
+
+export function clearAuthSessionCookie(response: NextResponse): void {
+  response.cookies.set(AUTH_COOKIE_NAME, "", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    path: "/",
+    maxAge: 0,
+    expires: new Date(0),
+  });
 }
 
 export function handleError(error: unknown, session?: SessionContext) {

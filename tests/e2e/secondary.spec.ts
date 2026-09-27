@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./auth-fixtures";
 import type { DashboardData } from "../../src/lib/types";
 
 for (const width of [320, 768, 1920]) {

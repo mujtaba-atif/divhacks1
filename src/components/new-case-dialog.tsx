@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ArrowRight, Building2, CheckCircle2, Search } from "lucide-react";
+import { getBuildingSummary } from "@/lib/building-context";
 import type { BuildingRecord, IssueType } from "@/lib/types";
 import { Button, Modal } from "./workspace-ui";
 
@@ -24,19 +25,37 @@ export function NewCaseDialog({ onClose, onCreate, busy }: { onClose: () => void
   const [building, setBuilding] = useState<BuildingRecord | null>(null);
   const [lookupBusy, setLookupBusy] = useState(false);
   const [error, setError] = useState("");
+  const lookupController = useRef<AbortController | null>(null);
+  const lookupVersion = useRef(0);
+  useEffect(() => () => lookupController.current?.abort(), []);
+
+  function clearLookup() {
+    lookupController.current?.abort();
+    lookupVersion.current += 1;
+    setLookupBusy(false);
+    setBuilding(null);
+    setError("");
+  }
 
   async function lookup() {
     if (lookupBusy || busy) return;
     if (!address.trim()) { setError("Enter a building address first."); return; }
+    lookupController.current?.abort();
+    const controller = new AbortController();
+    lookupController.current = controller;
+    const version = ++lookupVersion.current;
     setLookupBusy(true); setError(""); setBuilding(null);
     try {
       const query = new URLSearchParams({ address: address.trim(), borough });
-      const response = await fetch(`/api/buildings?${query}`);
+      const response = await fetch(`/api/buildings?${query}`, { cache: "no-store", signal: controller.signal });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Building records could not be retrieved.");
-      setBuilding(result);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Building lookup failed."); }
-    finally { setLookupBusy(false); }
+      if (version === lookupVersion.current) setBuilding(result);
+    } catch (cause) {
+      if (!controller.signal.aborted && version === lookupVersion.current) setError(cause instanceof Error ? cause.message : "Building lookup failed.");
+    } finally {
+      if (!controller.signal.aborted && version === lookupVersion.current) setLookupBusy(false);
+    }
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -56,12 +75,12 @@ export function NewCaseDialog({ onClose, onCreate, busy }: { onClose: () => void
     <form onSubmit={submit} className="case-form">
       <div className="form-section-title"><Building2 size={17} /><h3>Building & apartment</h3></div>
       <div className="form-grid">
-        <label className="field field-wide">Street address<input name="address" placeholder="123 West 110th Street" required maxLength={200} value={address} disabled={lookupBusy || busy} onChange={(event) => { setAddress(event.target.value); setBuilding(null); }} /></label>
-        <label className="field">Borough<select name="borough" value={borough} disabled={lookupBusy || busy} onChange={(event) => { setBorough(event.target.value); setBuilding(null); }}>{["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"].map((value) => <option key={value}>{value}</option>)}</select></label>
+        <label className="field field-wide">Street address<input name="address" placeholder="123 West 110th Street" required maxLength={200} value={address} disabled={busy} onChange={(event) => { clearLookup(); setAddress(event.target.value); }} /></label>
+        <label className="field">Borough<select name="borough" value={borough} disabled={busy} onChange={(event) => { clearLookup(); setBorough(event.target.value); }}>{["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"].map((value) => <option key={value}>{value}</option>)}</select></label>
         <label className="field">Apartment<input name="apartment" placeholder="4B" required maxLength={30} /></label>
       </div>
       <div className="lookup-row"><Button icon={Search} busy={lookupBusy} disabled={busy} onClick={lookup}>Check NYC records</Button><span>Public housing records</span></div>
-      {building && <div className={`inline-note ${building.warning ? "note-amber" : "note-green"}`}><CheckCircle2 size={17} /><div><strong>{building.source === "demo" ? "Sample building records" : "NYC Open Data"}</strong><p>{building.complaints.length} complaints · {building.violations.length} violations{building.warning ? `. ${building.warning}` : ""}</p></div></div>}
+      {building && (() => { const summary = getBuildingSummary(building); const incomplete = building.source === "demo" || building.lookupStatus !== "ok" || building.datasets?.complaints === "unavailable" || building.datasets?.violations === "unavailable"; return <div className={`inline-note ${incomplete ? "note-amber" : "note-green"}`}><CheckCircle2 size={17} /><div><strong>{building.source === "demo" ? "DEMO DATA · Sample building records" : "NYC Open Data / HPD"}</strong><p>{building.datasets?.complaints === "unavailable" ? "Recent complaints unavailable" : `${summary.recentComplaints} recent complaints (365 days)`} · {building.datasets?.violations === "unavailable" ? "Open violations unavailable" : `${summary.openViolations} open violations`}{building.warning ? `. ${building.warning}` : building.lookupStatus === "partial" ? ". Some public data is unavailable." : ""}</p></div></div>; })()}
       <div className="form-section-title"><h3>Repair details</h3></div>
       <div className="form-grid">
         <label className="field">Issue<select name="issue" defaultValue="heating"><option value="heating">Heating / hot water</option><option value="mold">Mold</option><option value="leak">Water leak</option><option value="pests">Pests</option><option value="elevator">Elevator</option><option value="other">Other repair</option></select></label>

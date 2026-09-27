@@ -3,13 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "packageManager": "pnpm@11.25.0",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "next dev --hostname 127.0.0.1",
     "build": "next build",
     "start": "next start --hostname 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "db:check": "node --conditions=react-server --import tsx scripts/check-mongodb.ts",
+    "seed:users": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/seed-users.ts",
     "nessie:check": "node --conditions=react-server --import tsx scripts/check-nessie.ts",
     "nessie:seed": "node --import tsx scripts/seed-nessie-demo.ts",
     "agent": "node --conditions=react-server --import tsx scripts/spectrum-replies.ts",
@@ -20,6 +23,7 @@
     "xrpl:setup-testnet": "node --conditions=react-server --import tsx scripts/xrpl-setup-testnet.ts"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "lucide-react": "^0.468.0",
     "mongodb": "^6.15.0",
     "next": "^16.2.0",
@@ -35,6 +39,7 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "mongodb-memory-server": "^11.3.0",
     "tsx": "^4.19.0",
     "typescript": "^5.8.0"
   }

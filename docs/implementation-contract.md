@@ -88,15 +88,17 @@ file upload, sample evidence, real building search, new-case form, case switcher
 export, reset. Clearly mark sample data and simulated funds. No legal promises.
 Mobile layout must preserve all actions. Use lucide-react icons.
 
-## Additive registration and contract approach
+## Authentication and contract compatibility
 
-Registration remains optional and is bound to the existing server-issued
-`rentescrow_session` cookie's owner ID; it neither replaces that cookie nor
-changes the anonymous dashboard bootstrap. A registered profile and accepted
-contract metadata are persisted with the same server-side session document.
-The existing `POST /api/cases` path remains the anonymous/demo-compatible path.
-New registered-contract case creation is exposed through a separate route and
-requires a stored acceptance of a canonical SHA-256 hash of the supplied terms.
+Email/password login replaces anonymous access. Only the three seeded users can
+sign in; registration is disabled. The cookie resolves a revocable MongoDB
+authentication session and an authoritative user. Each tenant's workspace owns
+its cases and contract records under a stable key derived from the user ID.
+`POST /api/cases` is tenant-only and sets ownership server-side. Contract-based
+creation still requires stored acceptance of a canonical terms hash; self-documentation
+works with the signed-in tenant. A request-side role cannot impersonate a landlord.
+Cross-role bilateral contract signing is outside the three-account repair demo.
+See [authentication and roles](auth-and-roles.md) for the current API boundaries.
 
 XRPL signing stays server-only: the application Payment action uses the configured
 Testnet wallet, and the separate native escrow module remains operator tooling.

@@ -28,7 +28,9 @@ configure email delivery. Restart the server and worker after changing settings.
 
 Use the intended workspace's `case.ownerId` from its dashboard API response for
 the tenant binding, not a browser cookie or a randomly chosen ID. This prevents
-other anonymous sessions with the same seeded case number from sending.
+other tenant accounts from sending through the approved case binding. After the
+authentication migration, use the seeded tenant's stable workspace owner ID;
+anonymous IDs are not automatically reassigned.
 
 ```sh
 pnpm photon:bind  # explicitly sets this existing case's test contact; no send

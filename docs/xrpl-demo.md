@@ -184,10 +184,12 @@ XRPL_SETTLEMENT_ENABLED=false pnpm test:e2e
 
 ## Remaining boundaries
 
-- This is a loopback hackathon demo with opaque session cookies and a dedicated
-  server-controlled Testnet wallet, not production tenant authentication or custody.
-- Live signing is blocked for MongoDB storage until distributed wallet locking
-  exists. The existing MongoDB simulated workflow is preserved.
+- This is a loopback hackathon demo with MongoDB email/password users, revocable
+  login cookies, and a dedicated server-controlled Testnet wallet. The three
+  demo passwords are public; production identity provisioning and custody are outside scope.
+- MongoDB uses shared non-expiring session/wallet locks and a durable public
+  transaction journal. After a crash, inspect the journal and ledger before
+  removing a stale lock; locks never expire into a second signing attempt.
 - Native escrow builders remain separate operator tooling. The application's
   settlement transaction is `Payment`; native escrow expiry/cancellation and
   preimage lifecycle were deliberately not introduced into this workflow.

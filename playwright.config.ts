@@ -15,13 +15,9 @@ export default defineConfig({
   use: { baseURL, trace: "retain-on-failure", screenshot: "only-on-failure" },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], channel: "chrome" } }],
   webServer: {
-    command: `node node_modules/next/dist/bin/next dev --hostname 127.0.0.1 --port ${target.port || "80"}`,
-    url: `${baseURL}/api/dashboard`,
+    command: `E2E_PORT=${target.port || "80"} node --import tsx scripts/e2e-server.ts`,
+    url: `${baseURL}/`,
     reuseExistingServer: false,
-    env: {
-      RENTESCROW_STORAGE: "local", NESSIE_ENABLED: "false", GEMINI_API_KEY: "",
-      PHOTON_LIVE_SEND: "false", XRPL_TESTNET_ENABLED: "false", XRPL_SETTLEMENT_ENABLED: "false",
-    },
     timeout: 120_000,
   },
 });

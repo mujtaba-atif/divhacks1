@@ -7,24 +7,33 @@ case-bound XRPL Testnet Payment provides real on-chain settlement using Test XRP
 
 ## Run locally
 
-Requires Node.js 22+ and pnpm 11.25.0 (pinned in `package.json`). No API keys are required for the demo.
+Requires Node.js 22+, pnpm 11.25.0, and a MongoDB Atlas connection for users, login sessions, and persistent workspaces.
 
 ```sh
 pnpm install --frozen-lockfile
+# Configure MONGODB_URI, MONGODB_DATABASE, and RENTESCROW_STORAGE=mongodb in .env.local.
+pnpm seed:users
 pnpm dev
 ```
 
-Open <http://127.0.0.1:3000>. The server binds to the loopback interface by
-default. Each browser session starts with a fictional building, a 54 F sample
-image, and case `RE-1042`. Demo messages never leave the application; simulated
-USD is not a bank balance or an XRP balance.
+Open <http://127.0.0.1:3000>. Sign in as Taylor Reed, Jordan Lee, or Alex Morgan
+using the demo shortcuts. Taylor owns `RE-1042`; Jordan starts with an empty,
+separate workspace; Alex sees assigned repair cases with private banking data
+excluded. Login and case history persist across browser sessions. Demo messages
+remain in the application; simulated USD is not a bank or XRP balance.
+
+See [authentication, role permissions, exact demo credentials, and the full
+Tenant → Landlord → Tenant walkthrough](docs/auth-and-roles.md).
 
 ## Walk through the demo
 
-1. Open the case and inspect its sample building history and initial evidence.
+1. Open the case and inspect **Building history** and the initial evidence. The
+   fictional `RE-1042` address is marked **DEMO DATA**; real-address lookups use
+   NYC public records with source, retrieval time, and availability labels.
 2. Review the repair request in Messages and approve sending the demo message.
 3. Set aside $400 of simulated funds in Escrow.
-4. Simulate the landlord scheduling a visit and reporting the repair complete.
+4. Sign out, sign in as the property manager, and schedule/report the repair.
+   Sign back in as Taylor to continue. Tenant accounts cannot submit landlord reports.
 5. Add the 72 F after-repair sample in Evidence and analyze it.
 6. Verify the before/after evidence, then confirm the repair is complete.
 7. Run the wallet-mismatch check to demonstrate a blocked transaction.
@@ -39,6 +48,9 @@ live AI analysis.
 See [Gemini setup, real-image testing, and judge walkthrough](docs/gemini-demo.md)
 for the live upload path and the deterministic 54°F → 72°F comparison.
 
+See [NYC building history](docs/nyc-building-history.md) for public-address search,
+related complaints, landlord access, caching, MongoDB persistence, and limitations.
+
 ## Integrations
 
 Use `.env.example` as the configuration reference. Put secrets in ignored
@@ -48,11 +60,11 @@ limitations.
 
 | Service | Available behavior |
 | --- | --- |
-| NYC Open Data | Public building complaint and violation lookup; explicit warnings on unavailable data |
+| NYC Open Data | Case-linked public building history, issue matching, source/freshness labels, and cached HPD complaints/violations |
 | Gemini | Real server-side upload analysis when configured; application rules compare before/after readings |
 | Nessie | Verified sandbox customer/account binding, rent history, tenant-reviewed costs, and account-substitution guardrail |
 | Photon Spectrum | Tenant-approved iMessage, durable send receipts, and an authenticated case reply listener |
-| MongoDB Atlas | Session records and GridFS uploads when configured; local atomic JSON persistence by default |
+| MongoDB Atlas | Users, hashed login sessions, tenant workspaces, assignments, repair actions, GridFS uploads, and settlement coordination |
 | XRPL | Guarded real Testnet Payment settlement; application escrow remains simulated USD |
 
 ## Photon Spectrum
@@ -111,13 +123,13 @@ pnpm build
 pnpm test:e2e
 ```
 
-The end-to-end tests use local Chrome and a dedicated server on port 3100. They
-refuse to reuse an existing server and explicitly disable live storage and
-providers, so `.env.local` cannot enable Atlas, Nessie, Gemini, Photon, or XRPL
-in the test server. Stop `pnpm dev` first because both processes use Next's build
-directory; keep its normal port 3000 separate from the test port. `E2E_BASE_URL`
-can select another unused local port. Tests create isolated demo sessions and
-never send real messages or submit ledger transactions.
+The end-to-end tests use local Chrome, a disposable local MongoDB server, and a
+dedicated app on port 3100. They seed the three demo users and use real password
+verification. Live providers are disabled, and the database URI overrides Atlas
+configuration from `.env.local`. The test app builds into `.next-e2e`, separately
+from normal development. `E2E_BASE_URL` can select another unused local port.
+Tests never send external messages or submit ledger transactions. The first run
+may download a local MongoDB test binary.
 
 Tests cover policy tampering, insufficient funds, release prerequisites,
 concurrent duplicate funding, persistent state, tenant isolation, upload
@@ -131,7 +143,7 @@ amount validation, durable pending receipts, recovery, and duplicate prevention.
 ## Structure
 
 - `src/components`: tenant workspace and case views.
-- `src/app/api`: session-scoped HTTP routes.
+- `src/app/api`: authenticated tenant and property-manager HTTP routes.
 - `src/lib/server`: persistence, validation, and case state transitions.
 - `src/lib/integrations`: provider adapters and isolated XRPL testnet tooling.
 - `scripts/xrpl-setup-testnet.ts`: one-time Testnet wallet setup.
@@ -139,11 +151,11 @@ amount validation, durable pending receipts, recovery, and duplicate prevention.
 - `tests`: policy, integration, API, and browser verification.
 - `.codex/agents`: the installed VoltAgent specialist profiles.
 
-Local records and uploads are stored under ignored `.data/`. The demo uses
-opaque browser-session cookies, not production user accounts. Do not publicly
-deploy this prototype with personal tenant records or live messaging enabled
-before adding production authentication, retention and backup controls, and
-delivery/reconciliation handling.
+Authentication uses MongoDB users and revocable opaque browser-session cookies.
+The three publicly documented demo passwords are for the hackathon only; there
+is no registration, password reset, email verification, or MFA. Local `.data/`
+storage remains available for legacy domain tests. Production deployment still
+needs credential provisioning, retention/backups, and operational recovery.
 
 ## Scope
 

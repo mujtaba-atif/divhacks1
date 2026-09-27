@@ -8,8 +8,8 @@ export async function POST(request: NextRequest) {
   let session: SessionContext | undefined;
   try {
     assertSameOrigin(request);
-    const input = await readJson(request, contractCaseSchema);
     session = await getSession(request);
+    const input = await readJson(request, contractCaseSchema);
     return respond({ case: await createCaseForContract(session.document.ownerId, input) }, session, 201);
   } catch (error) {
     return handleError(error, session);

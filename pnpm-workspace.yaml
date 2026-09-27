@@ -6,6 +6,7 @@ allowBuilds:
   sharp: true
   # This postinstall only prints version-range advice; no runtime files are built.
   protobufjs: false
+  mongodb-memory-server: true
 
 overrides:
   # GHSA-8988-4f7v-96qf; keep vulnerable transitive 2.x releases off the lockfile.

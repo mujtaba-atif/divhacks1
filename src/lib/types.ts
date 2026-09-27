@@ -3,6 +3,50 @@ export type CaseType = "bilateral" | "self_documentation";
 export type CaseStatus = "open" | "awaiting_repair" | "verification" | "verified" | "resolved";
 export type EvidenceStage = "before" | "after" | "receipt" | "other";
 
+export interface AuthUser {
+  id: string;
+  email: string;
+  role: "tenant" | "landlord";
+  displayName: string;
+  workspaceOwnerId: string;
+}
+
+export interface RepairAction {
+  id: string;
+  caseId: string;
+  landlordUserId: string;
+  kind: "scheduled" | "reported_complete" | "evidence_uploaded";
+  createdAt: string;
+  notes: string;
+  scheduledFor?: string;
+  evidenceId?: string;
+}
+
+/** Explicit public projection; never send a CaseRecord to a landlord client. */
+export interface LandlordCase {
+  id: string;
+  title: string;
+  issue: IssueType;
+  description: string;
+  noticedAt: string;
+  createdAt: string;
+  updatedAt: string;
+  status: CaseStatus;
+  property: { id: string; address: string; borough: string; apartment: string };
+  tenant: { displayName: string };
+  evidence: EvidenceRecord[];
+  messages: Pick<CaseMessage, "id" | "sender" | "body" | "createdAt" | "delivery">[];
+  timeline: TimelineEvent[];
+  repairReported: boolean;
+  repairs: RepairAction[];
+  financialSummary: {
+    disputedAmountCents: number;
+    escrowStatus: "unfunded" | "locked" | "released";
+    settlementStatus: "pending" | "complete";
+  };
+  verification?: EvidenceAnalysis;
+}
+
 export interface BuildingRecord {
   address: string;
   borough: string;
@@ -12,6 +56,34 @@ export interface BuildingRecord {
   violations: HousingRecord[];
   fetchedAt: string;
   warning?: string;
+  /** Stable HPD identifier when resolved, otherwise a canonical address key. */
+  buildingId?: string;
+  identifiers?: {
+    hpdBuildingId?: string;
+    bin?: string;
+    bbl?: string;
+  };
+  normalizedAddress?: {
+    houseNumber: string;
+    streetName: string;
+    borough: string;
+    zip?: string;
+  };
+  lookupStatus?: "ok" | "partial" | "unavailable" | "not_found" | "ambiguous" | "invalid_address" | "demo";
+  datasets?: {
+    complaints: "ok" | "unavailable";
+    violations: "ok" | "unavailable";
+  };
+  cache?: {
+    state: "fresh" | "cached" | "stale";
+    expiresAt: string;
+  };
+  summary?: {
+    recentComplaints: number;
+    openViolations: number;
+    heatingComplaints: number;
+    recentSince: string;
+  };
 }
 
 export interface HousingRecord {
@@ -20,6 +92,9 @@ export interface HousingRecord {
   description: string;
   status: string;
   date: string;
+  /** Complaint-level identifier; multiple provider problem rows are deduplicated to it. */
+  complaintId?: string;
+  normalizedStatus?: "open" | "closed" | "unknown";
 }
 
 export interface EvidenceAnalysis {
@@ -58,6 +133,8 @@ export interface EvidenceRecord {
   dataUrl?: string;
   temperatureF?: number;
   isDemo: boolean;
+  uploadedByRole?: "tenant" | "landlord";
+  uploadedByUserId?: string;
   analysis?: EvidenceAnalysis;
   analysisError?: {
     message: string;
@@ -271,6 +348,11 @@ export interface EscrowRecord {
 export interface CaseRecord {
   id: string;
   ownerId: string;
+  tenantUserId?: string;
+  tenantDisplayName?: string;
+  landlordUserId?: string;
+  propertyId?: string;
+  repairs?: RepairAction[];
   title: string;
   issue: IssueType;
   description: string;

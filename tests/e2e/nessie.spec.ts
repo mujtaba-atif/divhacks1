@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "./auth-fixtures";
+import type { Page } from "@playwright/test";
 import { createDemoCase } from "../../src/lib/seed";
 import type { CaseAction, CaseRecord, FinancialProfile, PolicyResult } from "../../src/lib/types";
 

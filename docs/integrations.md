@@ -9,22 +9,36 @@ against the sandbox. No real messages or production-money transfers were made.
 
 ## NYC Open Data
 
-`lookupBuilding(address, borough)` reads the public HPD
-[complaints and problems](https://data.cityofnewyork.us/Housing-Development/Housing-Maintenance-Code-Complaints-and-Problems/ygpa-z7cr)
+The server first resolves an active building in HPD's
+[Buildings Subject to HPD Jurisdiction](https://data.cityofnewyork.us/Housing-Development/Buildings-Subject-to-HPD-Jurisdiction/kj4p-ruqc)
+dataset, then queries [complaints and problems](https://data.cityofnewyork.us/Housing-Development/Housing-Maintenance-Code-Complaints-and-Problems/ygpa-z7cr)
 and [housing violations](https://data.cityofnewyork.us/Housing-Development/Housing-Maintenance-Code-Violations/wvxf-dwi5)
-Socrata datasets. Both response schemas were checked against public endpoint
-samples during implementation. The older `uwyv-629c` complaints dataset is not
-used. `NYC_OPEN_DATA_APP_TOKEN` is optional.
+by HPD building ID. Official metadata and public samples were checked during
+implementation. `NYC_OPEN_DATA_APP_TOKEN` is optional; no geocoding credentials
+are required. The older `uwyv-629c` complaints dataset is not used.
 
-The query uses a house number, full street spelling, and one of the five boroughs.
-Quotes are escaped before building the SoQL predicate; query parameters are URL
-encoded. There is no geocoding or fuzzy address matching. Results are capped at
-100 recent records per dataset; a complaint can contain more than one problem.
-An empty match is not evidence of a clean building. Timeouts and dataset failures
-produce explicit warnings, preserving any successful half of the lookup.
+Address normalization handles casing/spacing, common street suffixes and
+direction abbreviations, numbered-street ordinals, borough aliases, Queens
+hyphenated house numbers, and a trailing ZIP. Lookup is exact, never fuzzy.
+Ambiguous active buildings are reported without merging their histories. If the
+building file is unavailable, exact address history can be returned with an
+explicit partial-data warning. SoQL values are escaped and URL-encoded.
 
-Only the exact fictional address `123 Example Street, Brooklyn` returns the
-labeled demonstration fixture. Arbitrary addresses never inherit sample counts.
+Each history dataset is capped at its latest 100 rows, with a truncation warning.
+Complaint problems are grouped by complaint ID. Totals describe returned records,
+not a complete building inspection. Deterministic category/description rules
+identify complaints relevant to the case in the last 365 days. An empty match
+does not establish that a building is free of issues. Unavailable, malformed,
+ambiguous, and partial results are explicitly labeled.
+
+The existing tenant and landlord case workflows display public context with
+source and retrieval time. Successful records are cached for 15 minutes, persisted
+in MongoDB's `nyc_buildings` collection, and saved on `case.building`; failed
+refreshes can serve a labeled stale snapshot with its original timestamp.
+Only the fictional `123 Example Street, Brooklyn` address returns **DEMO DATA**.
+Arbitrary addresses never inherit sample counts. See the
+[building-history guide](nyc-building-history.md) for demo steps, cache retention,
+privacy boundaries, and tests.
 
 ## Gemini
 
@@ -172,9 +186,10 @@ and accepts only a matching validated `tesSUCCESS` plus exact delivered amount.
 [`Client.fundWallet`](https://js.xrpl.org/classes/Client.html#fundWallet) API.
 It writes a dedicated tenant seed directly to ignored `.env.local` and stores
 only the landlord's public address. Mainnet and custom RPC endpoints are rejected.
-Live execution is limited to local storage on one host; MongoDB signing is
-blocked until distributed wallet locking is implemented. MongoDB continues to
-support the simulated case workflow.
+MongoDB execution uses shared, non-expiring session and wallet operation locks
+plus a durable transaction journal. Local domain tooling retains its filesystem
+locks. A crashed process leaves a lock for operator recovery after reviewing the
+journal and ledger; no timeout automatically grants another signer access.
 
 ### Separate native escrow tooling
 
@@ -244,6 +259,7 @@ must be reconciled before changing approval or application state.
 
 The native escrow module remains operator-only. The app's separate Payment path
 adds case-bound authorization, durable idempotency/reconciliation and cross-process
-locks for the local hackathon demo. Production authentication, external custody,
-and distributed locking remain outside scope. Real rent funds and production
+locks for the hackathon demo, including MongoDB coordination. Email/password
+login is limited to the three seeded demo users; production account provisioning
+and external custody remain outside scope. Real rent funds and production
 legal workflows are outside this demonstration.
