@@ -19,11 +19,12 @@ export function getIntegrationStatus(): IntegrationStatus[] {
     if (getPhotonConfig()) photon = { ...photon, status: "configured", detail: "Spectrum credentials are configured. Bound case submission starts repair coordination; agents relay permitted updates between configured participants. Provider acceptance is not delivery proof." };
   } catch { photon = { ...photon, status: "unavailable", detail: "Live messaging is enabled but Spectrum credentials or tenant/case/recipient binding are incomplete. No demo fallback is used." }; }
   const mongoEnabled = process.env.RENTESCROW_STORAGE === "mongodb";
-  let xrpl: IntegrationStatus = { id: "xrpl", name: "XRP Ledger", status: "demo", detail: "USD escrow is simulated. Run pnpm xrpl:setup-testnet to enable a separate real Testnet Payment after verified repair." };
+  let xrpl: IntegrationStatus = { id: "xrpl", name: "XRP Ledger", status: "demo", detail: "USD escrow is simulated. Run pnpm xrpl:setup-testnet, then pnpm xrpl:setup-rlusd for a separate Testnet RLUSD Payment after verified repair." };
   try {
-    if (getXrplConfig()) xrpl = { ...xrpl, status: mongoEnabled && !process.env.MONGODB_URI ? "unavailable" : "configured", detail: mongoEnabled && !process.env.MONGODB_URI
+    const config = getXrplConfig();
+    if (config) xrpl = { ...xrpl, status: mongoEnabled && !process.env.MONGODB_URI ? "unavailable" : "configured", detail: mongoEnabled && !process.env.MONGODB_URI
       ? "MongoDB is selected but its server connection is missing. Configure storage before enabling settlement."
-      : "Dedicated Testnet wallets configured. Enable settlement per case; validated Test XRP Payments are separate from simulated USD. Durable wallet locks and receipts use the configured case storage." };
+      : `Dedicated Testnet wallets configured for ${config.asset}. Enable settlement per case; validated Testnet Payments are separate from simulated USD. Durable wallet locks and receipts use the configured case storage.` };
   } catch { xrpl = { ...xrpl, status: "unavailable", detail: "Testnet configuration is invalid. Check the pinned network, wallet addresses, signing credential, and amount on the server." }; }
   return [
     { id: "gemini", name: "Gemini", status: gemini ? "configured" : "demo", detail: gemini ? "Server credentials present; uploaded evidence uses Gemini. Connectivity has not been verified." : "Sample analysis only. Real uploads remain unverified until Gemini is configured." },

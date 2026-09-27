@@ -8,6 +8,13 @@ import { isValidClassicAddress } from "xrpl";
 import { z } from "zod";
 import type { XrplPending, XrplReceipt } from "@/lib/integrations/xrpl-settlement";
 import type { XrplSettlement } from "@/lib/types";
+import { CONTRACT_POLICY_VERSION } from "@/lib/contract-types";
+import {
+  SETTLEMENT_AGENT_ID,
+  SETTLEMENT_POLICY_VERSION,
+  sameAssetPermission,
+  validAssetPermission,
+} from "@/lib/xrpl-assets";
 import { ApiError } from "./errors";
 import { getMongoDatabase, mongoStorageEnabled } from "./mongodb";
 
@@ -31,18 +38,54 @@ const journalIdentity = z.string().min(1);
 const journalHash = z.string().regex(/^[A-F0-9]{64}$/);
 const journalWallet = z.string().refine(isValidClassicAddress);
 const journalDate = z.string().datetime({ offset: true }).refine((value) => Number.isFinite(Date.parse(value)));
-const intentSchema = z.object({
-  ownerId: journalIdentity, caseId: journalIdentity, escrowId: journalIdentity, settlementId: journalIdentity,
-  requestedAction: z.literal("REQUEST_SETTLEMENT_REVIEW"), transactionType: z.literal("Payment"),
-  network: z.literal("testnet"), source: journalWallet, destination: journalWallet,
-  amountDrops: z.string().regex(/^[1-9]\d*$/), amountUsdCents: z.number().int().positive().safe(),
-  tenantUserId: journalIdentity.optional(), landlordUserId: journalIdentity.optional(), landlordWallet: journalIdentity.optional(),
-}).strict();
 const policySchema = z.object({
   approved: z.literal(true),
   checks: z.array(z.object({ key: z.string(), label: z.string(), passed: z.literal(true), detail: z.string() }).strict()).min(1),
   reasonCodes: z.array(z.string()).optional(),
 }).strict();
+const assetMetadataSchema = {
+  agentId: z.string().optional(), policyVersion: z.string().optional(),
+  asset: z.enum(["XRP", "RLUSD"]).optional(), amount: z.string().optional(),
+  issuer: z.string().optional(), currency: z.string().optional(),
+};
+const contractMetadataSchema = {
+  contractId: z.string().uuid().optional(), contractPolicyVersion: z.literal(CONTRACT_POLICY_VERSION).optional(),
+  policyHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), triggeringEvent: journalIdentity.optional(),
+};
+type ContractMetadata = {
+  contractId?: string; contractPolicyVersion?: string; policyHash?: string; triggeringEvent?: string;
+};
+function sameContractPermission(left: ContractMetadata, right: ContractMetadata) {
+  return left.contractId === right.contractId
+    && left.contractPolicyVersion === right.contractPolicyVersion
+    && left.policyHash === right.policyHash
+    && left.triggeringEvent === right.triggeringEvent;
+}
+const intentSchema = z.object({
+  ownerId: journalIdentity, caseId: journalIdentity, escrowId: journalIdentity, settlementId: journalIdentity,
+  requestedAction: z.enum(["REQUEST_SETTLEMENT_REVIEW", "REQUEST_SETTLEMENT", "RELEASE_RENT"]), transactionType: z.literal("Payment"),
+  network: z.literal("testnet"), source: journalWallet, destination: journalWallet,
+  amountDrops: z.string().regex(/^\d+$/), amountUsdCents: z.number().int().positive().safe(),
+  tenantUserId: journalIdentity.optional(), landlordUserId: journalIdentity.optional(), landlordWallet: journalIdentity.optional(),
+  ...assetMetadataSchema, ...contractMetadataSchema,
+}).strict().superRefine((intent, context) => {
+  const legacy = intent.agentId === undefined;
+  const contractGoverned = intent.contractId !== undefined || intent.contractPolicyVersion !== undefined
+    || intent.policyHash !== undefined || intent.triggeringEvent !== undefined || intent.requestedAction === "RELEASE_RENT";
+  const valid = legacy
+    ? intent.requestedAction === "REQUEST_SETTLEMENT_REVIEW"
+      && intent.policyVersion === undefined && intent.asset === undefined && intent.amount === undefined
+      && intent.issuer === undefined && intent.currency === undefined
+      && !contractGoverned
+      && validAssetPermission({ amountDrops: intent.amountDrops })
+    : intent.agentId === SETTLEMENT_AGENT_ID && intent.policyVersion === SETTLEMENT_POLICY_VERSION
+      && validAssetPermission(intent) && (contractGoverned
+        ? intent.requestedAction === "RELEASE_RENT" && !!intent.contractId && !!intent.contractPolicyVersion
+          && !!intent.policyHash && !!intent.triggeringEvent && intent.asset === "RLUSD"
+        : intent.requestedAction === "REQUEST_SETTLEMENT" && !intent.contractId
+          && !intent.contractPolicyVersion && !intent.policyHash && !intent.triggeringEvent);
+  if (!valid) context.addIssue({ code: z.ZodIssueCode.custom, message: "Invalid settlement asset permission" });
+});
 const pendingSchema = z.object({
   hash: journalHash, sequence: z.number().int().positive().safe(),
   lastLedgerSequence: z.number().int().positive().safe(), preparedLedgerIndex: z.number().int().positive().safe(),
@@ -56,10 +99,28 @@ const pendingSchema = z.object({
 });
 const receiptSchema = z.object({
   hash: journalHash, caseId: journalIdentity, settlementId: journalIdentity,
-  source: journalWallet, destination: journalWallet, amountDrops: z.string().regex(/^[1-9]\d*$/),
+  source: journalWallet, destination: journalWallet, amountDrops: z.string().regex(/^\d+$/),
   validated: z.literal(true), result: z.literal("tesSUCCESS"), ledgerIndex: z.number().int().positive().safe(),
   validatedAt: journalDate,
-}).strict();
+  ...assetMetadataSchema, ...contractMetadataSchema,
+  requestedAction: z.enum(["REQUEST_SETTLEMENT_REVIEW", "REQUEST_SETTLEMENT", "RELEASE_RENT"]).optional(),
+  transactionHash: journalHash.optional(), validatedResult: z.literal("tesSUCCESS").optional(),
+  timestamp: journalDate.optional(), policyDecision: policySchema.optional(),
+}).strict().superRefine((receipt, context) => {
+  const contractGoverned = receipt.contractId !== undefined || receipt.contractPolicyVersion !== undefined
+    || receipt.policyHash !== undefined || receipt.triggeringEvent !== undefined || receipt.requestedAction === "RELEASE_RENT";
+  if (receipt.agentId !== undefined && (receipt.agentId !== SETTLEMENT_AGENT_ID
+    || receipt.policyVersion !== SETTLEMENT_POLICY_VERSION
+    || (contractGoverned
+      ? receipt.requestedAction !== "RELEASE_RENT" || !receipt.contractId || !receipt.contractPolicyVersion
+        || !receipt.policyHash || !receipt.triggeringEvent || receipt.asset !== "RLUSD"
+      : receipt.requestedAction !== "REQUEST_SETTLEMENT" || !!receipt.contractId
+        || !!receipt.contractPolicyVersion || !!receipt.policyHash || !!receipt.triggeringEvent)
+    || receipt.transactionHash !== receipt.hash || receipt.validatedResult !== receipt.result
+    || receipt.timestamp !== receipt.validatedAt || !receipt.policyDecision || !validAssetPermission(receipt))) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Invalid settlement receipt metadata" });
+  }
+});
 const walletJournalSchema = z.object({
   version: z.literal(1), ownerId: journalIdentity, caseId: journalIdentity,
   escrowId: journalIdentity, settlementId: journalIdentity, status: z.enum(["pending", "validated"]),
@@ -78,6 +139,11 @@ const walletJournalSchema = z.object({
     if (!receipt || receipt.hash !== record.pending.hash || receipt.caseId !== record.caseId
       || receipt.settlementId !== record.settlementId || receipt.source !== intent.source
       || receipt.destination !== intent.destination || receipt.amountDrops !== intent.amountDrops
+      || !sameAssetPermission(receipt, intent)
+      || receipt.agentId !== intent.agentId || receipt.policyVersion !== intent.policyVersion
+      || !sameContractPermission(receipt, intent)
+      || (intent.agentId !== undefined && (receipt.requestedAction !== intent.requestedAction
+        || JSON.stringify(receipt.policyDecision) !== JSON.stringify(record.pending.policyDecision)))
       || receipt.ledgerIndex <= record.pending.preparedLedgerIndex
       || receipt.ledgerIndex > record.pending.lastLedgerSequence) {
       context.addIssue({ code: z.ZodIssueCode.custom, message: "Journal receipt mismatch" });
@@ -106,6 +172,12 @@ function assertJournalIdentity(record: XrplJournalRecord, settlement: XrplSettle
     || record.pending.intent.ownerId !== settlement.ownerId || record.pending.intent.escrowId !== settlement.escrowId
     || record.pending.intent.source !== settlement.source || record.pending.intent.destination !== settlement.destination
     || record.pending.intent.amountDrops !== settlement.amountDrops
+    || !sameAssetPermission(record.pending.intent, settlement)
+    || record.pending.intent.agentId !== settlement.agentId
+    || record.pending.intent.policyVersion !== settlement.policyVersion
+    || !sameContractPermission(record.pending.intent, settlement)
+    || (settlement.agentId !== undefined && (!["REQUEST_SETTLEMENT", "RELEASE_RENT"].includes(settlement.requestedAction ?? "")
+      || record.pending.intent.requestedAction !== settlement.requestedAction))
     || record.pending.intent.tenantUserId !== settlement.tenantUserId
     || record.pending.intent.landlordUserId !== settlement.landlordUserId
     || record.pending.intent.landlordWallet !== settlement.landlordWallet
@@ -300,7 +372,12 @@ export async function recordXrplValidated(
   }
   if (receipt.hash !== pending.hash || receipt.caseId !== settlement.caseId || receipt.settlementId !== settlement.id
     || receipt.source !== settlement.source || receipt.destination !== settlement.destination
-    || receipt.amountDrops !== settlement.amountDrops || receipt.result !== "tesSUCCESS" || receipt.validated !== true) {
+    || receipt.amountDrops !== settlement.amountDrops || !sameAssetPermission(receipt, settlement)
+    || receipt.agentId !== settlement.agentId || receipt.policyVersion !== settlement.policyVersion
+    || !sameContractPermission(receipt, settlement)
+    || (settlement.agentId !== undefined && (receipt.requestedAction !== pending.intent.requestedAction
+      || JSON.stringify(receipt.policyDecision) !== JSON.stringify(pending.policyDecision)))
+    || receipt.result !== "tesSUCCESS" || receipt.validated !== true) {
     throw new ApiError(500, "The validated XRPL receipt does not match the authorized pending transaction.", false,
       "XRPL_RECEIPT_MISMATCH");
   }

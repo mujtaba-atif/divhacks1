@@ -106,7 +106,7 @@ function validatedResult(blob: string) {
   } } as never;
 }
 
-test("agent authorization accepts no payment fields and its request contains only caseId and action", async (t) => {
+test("agent authorization accepts no payment fields and emits only the case settlement request", async (t) => {
   assert.equal(actionSchema.safeParse({
     action: "authorize_xrpl_agent",
     destination: Wallet.generate().classicAddress,
@@ -121,8 +121,8 @@ test("agent authorization accepts no payment fields and its request contains onl
   assert.equal(proposeXrplAgentSettlement(record), null);
   record.xrplSettlement!.agentAuthorizedAt = new Date().toISOString();
   const request = proposeXrplAgentSettlement(record);
-  assert.deepEqual(request, { caseId: record.id, action: "settle_xrpl" });
-  assert.deepEqual(Object.keys(request!).sort(), ["action", "caseId"]);
+  assert.deepEqual(request, { caseId: record.id, requestedAction: "REQUEST_SETTLEMENT" });
+  assert.deepEqual(Object.keys(request!).sort(), ["caseId", "requestedAction"]);
 });
 
 test("unarmed cases remain manual after tenant confirmation", async (t) => {
@@ -195,6 +195,14 @@ test("armed agent waits for case conditions, then confirmation settles exactly o
   assert.equal(ledger.submit.mock.callCount(), 1);
   const receipt = settled.case.escrow.audit.find((entry) => entry.status === "validated" && entry.action === "Payment");
   assert.equal(receipt?.actor, "settlement_agent");
+  assert.equal(receipt?.agentId, "rentescrow-settlement-v1");
+  assert.equal(receipt?.policyVersion, "CASE_SETTLEMENT_V1");
+  assert.equal(receipt?.asset, "XRP");
+  assert.equal(receipt?.amount, "1");
+  assert.equal(receipt?.requestedAction, "REQUEST_SETTLEMENT");
+  assert.equal(receipt?.transactionHash, receipt?.hash);
+  assert.equal(receipt?.validatedResult, "tesSUCCESS");
+  assert.ok(receipt?.timestamp);
   assert.equal(receipt?.policyDecision?.approved, true);
   assert.ok(receipt?.policyDecision?.checks.some((check) => check.key === "XRPL_FINAL_TRANSACTION"));
 

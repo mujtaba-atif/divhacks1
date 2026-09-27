@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { Client, Wallet, convertStringToHex, decode, isValidClassicAddress, validate, xrpToDrops, type EscrowCreate, type EscrowFinish, type Payment } from "xrpl";
+import { Client, Wallet, convertStringToHex, decode, isValidClassicAddress, validate, xrpToDrops, type EscrowCreate, type EscrowFinish, type Payment, type TrustSet } from "xrpl";
 import { z } from "zod";
 import { evaluatePolicy } from "../policy";
 import type { CaseRecord, TransactionIntent } from "../types";
@@ -96,8 +96,8 @@ export function buildTestnetEscrowFinish(approvalInput: TestnetEscrowApproval, p
 }
 
 export function assertFinalTestnetTransaction(
-  transaction: EscrowCreate | EscrowFinish | Payment,
-  expected: EscrowCreate | EscrowFinish | Payment,
+  transaction: EscrowCreate | EscrowFinish | Payment | TrustSet,
+  expected: EscrowCreate | EscrowFinish | Payment | TrustSet,
   ledgerIndex: number,
 ): void {
   const actual = transaction as unknown as Record<string, unknown>;

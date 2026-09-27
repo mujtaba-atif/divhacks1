@@ -21,7 +21,9 @@
     "test": "node --conditions=react-server --import tsx --test tests/*.test.ts",
     "test:e2e": "playwright test",
     "xrpl:setup-testnet": "node --conditions=react-server --import tsx scripts/xrpl-setup-testnet.ts",
-    "xrpl:prepare-demo": "node --env-file=.env.local --conditions=react-server --import tsx scripts/xrpl-prepare-demo.ts"
+    "xrpl:prepare-demo": "node --env-file=.env.local --conditions=react-server --import tsx scripts/xrpl-prepare-demo.ts",
+    "xrpl:setup-rlusd": "node --env-file=.env.local --conditions=react-server --import tsx scripts/xrpl-setup-rlusd.ts",
+    "contracts:evaluate": "node --env-file=.env.local --conditions=react-server --import tsx scripts/contracts-evaluate.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

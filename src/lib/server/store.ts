@@ -209,7 +209,7 @@ export async function assignedWorkspaceOwners(landlordUserId: string): Promise<s
   if (mongoEnabled()) {
     const database = await getMongoDatabase();
     const documents = await database.collection<SessionDocument>("sessions")
-      .find({ "cases.landlordUserId": landlordUserId }, { projection: { ownerId: 1 } }).toArray();
+      .find({ $or: [{ "cases.landlordUserId": landlordUserId }, { "managedProperty.landlordUserId": landlordUserId }] }, { projection: { ownerId: 1 } }).toArray();
     return documents.map((document) => document.ownerId);
   }
   let entries: string[];
@@ -219,7 +219,8 @@ export async function assignedWorkspaceOwners(landlordUserId: string): Promise<s
   for (const entry of entries) {
     if (!/^[a-f0-9]{64}\.json$/.test(entry)) continue;
     const document = JSON.parse(await readFile(path.join(dataDirectory, entry), "utf8")) as SessionDocument;
-    if (document.cases.some((record) => record.landlordUserId === landlordUserId)) owners.push(document.ownerId);
+    if (document.managedProperty?.landlordUserId === landlordUserId
+      || document.cases.some((record) => record.landlordUserId === landlordUserId)) owners.push(document.ownerId);
   }
   return owners;
 }
@@ -341,6 +342,9 @@ export async function withXrplWalletLock<T>(source: string, operation: () => Pro
 
 export async function resetSession(ownerId: string) {
   return mutateSession(ownerId, async (document) => {
+    if (document.contracts?.some((contract) => contract.policy && contract.acceptances.length > 0)) {
+      throw new ApiError(409, "Signed prototype agreement history must be preserved. Create a new agreement version instead.", false, "AGREEMENT_HISTORY_PRESERVED");
+    }
     if (document.uncertainDeliveries?.length || document.cases.some((item) => item.messages.some((message) =>
       (message.provider === "spectrum" || message.provider === "photon" || message.provider === undefined)
       && ["sent", "received", "pending", "uncertain"].includes(message.delivery)))) {
@@ -392,4 +396,24 @@ export function updateSharedBalance(document: SessionDocument, balanceCents: num
   for (const caseRecord of document.cases) {
     if (caseRecord.status !== "resolved") caseRecord.accountBalanceCents = balanceCents;
   }
+}
+
+/** Internal scheduled evaluator discovery. Each aggregate is rechecked under its session lock. */
+export async function contractWorkspaceOwners(): Promise<string[]> {
+  if (mongoEnabled()) {
+    const database = await getMongoDatabase();
+    const documents = await database.collection<SessionDocument>("sessions")
+      .find({ contracts: { $elemMatch: { status: "active", policyHash: { $exists: true } } } }, { projection: { ownerId: 1 } }).toArray();
+    return documents.map((document) => document.ownerId);
+  }
+  let entries: string[];
+  try { entries = await readdir(dataDirectory); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  const owners: string[] = [];
+  for (const entry of entries) {
+    if (!/^[a-f0-9]{64}\.json$/.test(entry)) continue;
+    const document = JSON.parse(await readFile(path.join(dataDirectory, entry), "utf8")) as SessionDocument;
+    if (document.contracts?.some((contract) => contract.status === "active" && contract.policyHash)) owners.push(document.ownerId);
+  }
+  return owners;
 }

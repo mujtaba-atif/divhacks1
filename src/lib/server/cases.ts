@@ -69,7 +69,10 @@ import type { newCaseSchema } from "./validation";
 import { assertXrplWalletAvailable, readXrplJournal, recordXrplPending, recordXrplValidated } from "./xrpl-journal";
 import { requireLandlordCaseAccess } from "./case-access";
 import { getBuildingContext } from "./buildings";
-import { proposeXrplAgentSettlement } from "./xrpl-agent";
+import { proposeContractAgentSettlement, proposeXrplAgentSettlement } from "./xrpl-agent";
+import { evaluateContractFeeRequest, evaluateContractPolicy, isActiveContract } from "./contract-policy";
+import type { ContractPolicyDecision } from "@/lib/contract-types";
+import { formatSettlementAsset, sameAssetPermission } from "@/lib/xrpl-assets";
 
 export type CaseActionResult = { case: CaseRecord; policy?: PolicyResult };
 interface MessagingDependencies {
@@ -407,14 +410,29 @@ function appendXrplAudit(
 ) {
   const settlement = caseRecord.xrplSettlement;
   const { policy, actor, ...receipt } = options;
+  const createdAt = now();
   caseRecord.escrow.audit.push({
-    id: randomUUID(), action: "Payment", status, createdAt: now(), network: "testnet",
+    id: randomUUID(), action: "Payment", status, createdAt, timestamp: createdAt, network: "testnet",
     caseId: caseRecord.id, amountCents: intent.amountUsdCents, source: intent.source,
     attemptedCaseId: intent.caseId, settlementId: intent.settlementId,
     requestedAction: intent.requestedAction, requestedTransactionType: intent.transactionType,
     requestedNetwork: intent.network,
     destination: intent.destination, amountDrops: intent.amountDrops,
-    approvedAmountDrops: settlement?.amountDrops, detail, ...receipt,
+    approvedAmountDrops: settlement?.amountDrops,
+    ...(intent.agentId ? { agentId: intent.agentId } : {}),
+    ...(intent.policyVersion ? { policyVersion: intent.policyVersion } : {}),
+    ...(intent.asset ? { asset: intent.asset } : {}),
+    ...(intent.amount ? { amount: intent.amount } : {}),
+    ...(settlement?.amount ? { approvedAmount: settlement.amount } : {}),
+    ...(intent.issuer ? { issuer: intent.issuer } : {}),
+    ...(intent.currency ? { currency: intent.currency } : {}),
+    ...(intent.contractId ? { contractId: intent.contractId, contractPolicyVersion: intent.contractPolicyVersion,
+      policyHash: intent.policyHash, triggeringEvent: intent.triggeringEvent,
+      evaluatedRules: caseRecord.contractEvaluation ? contractRuleChecks(caseRecord.contractEvaluation) : undefined,
+      contractDecision: caseRecord.contractEvaluation } : {}),
+    ...(options.hash ? { transactionHash: options.hash } : {}),
+    ...(options.result ? { validatedResult: options.result } : {}),
+    detail, ...receipt,
     ...(policy ? { policyDecision: structuredClone(policy) } : {}),
     ...(actor ? { actor } : {}),
   });
@@ -439,20 +457,35 @@ function applyXrplReceipt(
   settlement.ledgerIndex = receipt.ledgerIndex;
   settlement.result = receipt.result;
   settlement.validatedAt = receipt.validatedAt;
+  settlement.requestedAction = settlement.contractId ? "RELEASE_RENT" : settlement.agentId ? "REQUEST_SETTLEMENT" : settlement.requestedAction;
+  settlement.policyDecision = context.policy ? structuredClone(context.policy) : settlement.policyDecision;
+  settlement.transactionHash = receipt.hash;
+  settlement.validatedResult = receipt.result;
+  settlement.timestamp = receipt.validatedAt;
   settlement.detail = "Validated tesSUCCESS on XRPL Testnet.";
   delete settlement.errorCode;
   caseRecord.escrow.status = "released";
   caseRecord.escrow.finishHash = receipt.hash;
   caseRecord.escrow.releasedAt = receipt.validatedAt;
+  const disputeClosed = Boolean(caseRecord.contractId && caseRecord.contractDispute === "open");
+  if (disputeClosed) caseRecord.contractDispute = "resolved";
   const intent = makeXrplIntent(caseRecord);
   if (!caseRecord.escrow.audit.some((entry) => entry.action === "Payment"
     && entry.status === "validated" && entry.hash === receipt.hash)) {
-    appendXrplAudit(caseRecord, intent, "validated", "Real Test XRP Payment reached a validated tesSUCCESS ledger result.", {
+    appendXrplAudit(caseRecord, intent, "validated",
+      `A real XRPL Testnet Payment delivering ${formatSettlementAsset(settlement)} reached a validated tesSUCCESS ledger result.`, {
       hash: receipt.hash, ledgerIndex: receipt.ledgerIndex, result: receipt.result,
       validated: true, signed: true, submitted: true, ...context,
     });
     event(caseRecord, "XRPL Testnet settlement validated",
-      `${receipt.amountDrops} drops reached the authorized recipient. Transaction ${receipt.hash}.`, "escrow");
+      `${formatSettlementAsset(settlement)} reached the authorized recipient. Transaction ${receipt.hash}.`, "escrow");
+  }
+  if (disputeClosed && caseRecord.contractSnapshot) {
+    // A closure event is evaluated for its audit only. Keep the original release
+    // decision and receipt visible; the completed obligation must never run again.
+    const closed = evaluateContractPolicy(caseRecord.contractSnapshot, caseRecord, { fundsAvailable: false }, new Date());
+    recordContractEvaluation(caseRecord, closed, "dispute_closed", false);
+    event(caseRecord, "Agreement dispute closed", "The validated settlement closed the dispute. Policy now blocks another execution of this obligation.", "case");
   }
   updateStatus(caseRecord);
 }
@@ -562,6 +595,149 @@ function simulateSigningBoundary(caseRecord: CaseRecord, intent: Readonly<Transa
   return `DEMO-${randomBytes(24).toString("hex").toUpperCase()}`;
 }
 
+/** Load authority from the same locked aggregate as the case, never from request data. */
+function hydrateContractAuthority(document: SessionDocument, record: CaseRecord) {
+  const contract = document.contracts?.find((item) => item.id === record.contractId);
+  if (!contract || !isActiveContract(contract) || !contract.policy) {
+    throw new ApiError(409, "Both assigned parties must sign an active RentEscrow Agreement before this financial workflow.", false, "ACTIVE_CONTRACT_REQUIRED");
+  }
+  const policy = contract.policy;
+  if (contract.caseId !== record.id || document.tenantUserId !== policy.tenantUserId
+    || record.tenantUserId !== policy.tenantUserId || record.landlordUserId !== policy.landlordUserId
+    || record.propertyId !== policy.property.id || document.managedProperty?.landlordUserId !== policy.landlordUserId
+    || record.monthlyRentCents !== policy.monthlyRentCents || record.disputedAmountCents !== policy.monthlyRentCents
+    || record.escrow.amountCents !== policy.monthlyRentCents) {
+    throw new ApiError(409, "This case, parties, property or amount no longer match the signed agreement.", false, "CASE_CONTRACT_MISMATCH");
+  }
+  record.contractSnapshot = structuredClone(contract);
+  return contract;
+}
+
+function contractRuleChecks(decision: ContractPolicyDecision): PolicyResult["checks"] {
+  return decision.evaluatedRules.map((rule) => ({ key: rule.code, label: rule.code, passed: rule.passed, detail: rule.detail }));
+}
+
+function recordContractEvaluation(record: CaseRecord, decision: ContractPolicyDecision, trigger: string, rememberDecision = true) {
+  const timestamp = now();
+  // The cap prevents new evaluations/payments. Receipt-driven closure is exempt
+  // so a completed ledger transaction can always persist its recovery/audit state.
+  if (rememberDecision) {
+    record.contractEvaluation = decision;
+    record.contractEvaluatedAt = timestamp;
+    record.contractTrigger = trigger;
+    record.contractEffects = { ...record.contractEffects, ...decision.effects };
+    const fingerprint = createHash("sha256").update(JSON.stringify({ decision, trigger })).digest("hex");
+    if (record.contractEvaluationFingerprint === fingerprint) return;
+    record.contractEvaluationFingerprint = fingerprint;
+    if (record.escrow.audit.length >= 500) throw new ApiError(409, "The prototype agreement audit limit has been reached.", false, "CONTRACT_AUDIT_CAPACITY");
+  }
+  record.escrow.audit.push({
+    id: randomUUID(), action: "PolicyCheck", createdAt: timestamp, timestamp,
+    status: decision.allowed ? "validated" : "rejected", network: "demo",
+    amountCents: decision.effects.lateFeeCents ?? record.escrow.amountCents,
+    agentId: "rentescrow-settlement-v1", contractId: decision.contractId, caseId: record.id,
+    policyVersion: decision.policyVersion, contractPolicyVersion: decision.policyVersion, policyHash: decision.policyHash,
+    triggeringEvent: trigger, evaluatedRules: contractRuleChecks(decision), contractDecision: decision,
+    requestedAction: decision.action, asset: decision.asset, amount: decision.action === "RELEASE_RENT" ? decision.amount : "0",
+    destination: record.contractSnapshot!.policy!.settlement.destination,
+    policyDecision: { approved: decision.allowed, checks: contractRuleChecks(decision) },
+    actor: "settlement_agent", signed: false, submitted: false, code: decision.reason,
+    detail: `Contract-configured demo policy: ${decision.reason}. ${decision.action === "RELEASE_RENT"
+      ? "Release is eligible for the guarded settlement boundary; this evaluation is not a ledger receipt."
+      : "Only the signed prototype's simulated record/hold rule was applied. No payment was signed or submitted."}`,
+  });
+}
+
+/** One evaluator for application events and the scheduled worker, under the existing session lock. */
+async function evaluateContractInSession(
+  document: SessionDocument, record: CaseRecord, mutation: SessionMutationContext,
+  trigger: string, execute = true,
+): Promise<CaseActionResult> {
+  const contract = hydrateContractAuthority(document, record);
+  if (execute && document.xrplAuthorized !== true) {
+    throw new ApiError(403, "This tenant workspace is not bound to the configured XRPL signer.", false, "XRPL_ACCOUNT_NOT_AUTHORIZED");
+  }
+  if (execute && record.xrplSettlement?.status === "pending") {
+    // Recovery is read-only and uses the original signed intent, even when current eligibility changed.
+    try { return await applyAction(document, record, { action: "reconcile_xrpl" }, mutation, defaultMessaging, "settlement_agent"); }
+    catch (error) { if (error instanceof ApiError && error.persistAudit) return { case: record, policy: error.policy }; throw error; }
+  }
+  const decision = evaluateContractPolicy(contract, record, { fundsAvailable: record.escrow.status === "locked" }, new Date());
+  recordContractEvaluation(record, decision, trigger);
+  if (execute && record.escrow.status === "locked" && !record.xrplSettlement) {
+    record.xrplSettlement = createXrplSettlement(record);
+  }
+  if (!execute || !decision.allowed || decision.action !== "RELEASE_RENT" || record.xrplSettlement?.hash) {
+    return { case: record, policy: { approved: decision.allowed, checks: contractRuleChecks(decision) } };
+  }
+  const scope = contract.policy!;
+  const otherExecution = document.cases.find((other) => other.id !== record.id
+    && other.contractSnapshot?.policy?.tenantUserId === scope.tenantUserId
+    && other.contractSnapshot.policy.property.id === scope.property.id
+    && other.contractSnapshot.policy.obligationPeriod === scope.obligationPeriod
+    && (other.xrplSettlement?.hash || other.escrow.status === "released"));
+  if (otherExecution) throw new ApiError(409, "This rental obligation already has a recorded execution.", true, "SETTLEMENT_ALREADY_COMPLETED");
+  if (!record.xrplSettlement) record.xrplSettlement = createXrplSettlement(record);
+  const settlement = record.xrplSettlement;
+  if (settlement.contractId !== contract.id || settlement.policyHash !== contract.policyHash) {
+    throw new ApiError(409, "Existing payment permission is not this agreement's permission. It cannot be silently replaced.", true, "CONTRACT_BINDING_MISMATCH");
+  }
+  if (settlement.agentRequestedAt) {
+    // A new evaluation may retry a proven pre-sign availability failure. A signed,
+    // uncertain or dispatched attempt is never automatically replaced.
+    const last = [...record.escrow.audit].reverse().find((item) => item.action === "Payment");
+    const safeRetry = last?.signed === false && last.submitted === false && settlement.status === "failed"
+      && ["INSUFFICIENT_RLUSD_FUNDS", "INSUFFICIENT_XRPL_FUNDS", "XRPL_UNAVAILABLE", "RLUSD_TRUSTLINE_REQUIRED"].includes(settlement.errorCode ?? "")
+      && Date.now() - Date.parse(settlement.agentRequestedAt) >= 60_000;
+    if (!safeRetry) return { case: record };
+    settlement.status = "ready";
+    delete settlement.agentRequestedAt;
+  }
+  settlement.triggeringEvent = trigger;
+  settlement.agentAuthorizedAt = contract.acceptances.map((acceptance) => acceptance.acceptedAt).sort().at(-1);
+  const request = proposeContractAgentSettlement(record);
+  if (!request) return { case: record };
+  // The only request fields are contractId, caseId and RELEASE_RENT.
+  settlement.agentRequestedAt = now();
+  event(record, "Contract settlement agent requested rent release",
+    `Agreement ${request.contractId}, ${contract.policyVersion}, policy ${contract.policyHash}; trigger ${trigger}. No individual payment approval is required.`, "escrow");
+  await mutation.checkpoint();
+  try { return await applyAction(document, record, { action: "settle_xrpl" }, mutation, defaultMessaging, "settlement_agent"); }
+  catch (error) {
+    // Keep the fact/event and its audited settlement outcome. A fact confirmation
+    // must never be rolled back because a ledger service is temporarily unavailable.
+    if (error instanceof ApiError && error.persistAudit) return { case: record, policy: error.policy };
+    throw error;
+  }
+}
+
+/** Scheduled entry point: no caller-supplied dates, amounts, wallets or actions. */
+export async function evaluateActiveContracts(ownerId: string, options: { dryRun?: boolean } = {}) {
+  if (options.dryRun) {
+    const document = await readSession(ownerId);
+    if (!document) return [];
+    return (document.contracts ?? []).filter((contract) => contract.status === "active" && contract.policy && contract.caseId)
+      .flatMap((contract) => {
+        const record = document.cases.find((item) => item.id === contract.caseId && item.contractId === contract.id);
+        if (!record) return [];
+        hydrateContractAuthority(document, record);
+        const decision = evaluateContractPolicy(contract, record, { fundsAvailable: record.escrow.status === "locked" }, new Date());
+        return [{ contractId: contract.id, caseId: record.id, reason: decision.reason, status: record.xrplSettlement?.status }];
+      });
+  }
+  return mutateSession(ownerId, async (document, mutation) => {
+    const results: { contractId: string; caseId: string; reason: string; status?: string }[] = [];
+    for (const contract of document.contracts ?? []) {
+      if (contract.status !== "active" || !contract.policy || !contract.caseId) continue;
+      const record = document.cases.find((item) => item.id === contract.caseId);
+      if (!record || record.contractId !== contract.id) continue;
+      await evaluateContractInSession(document, record, mutation, "scheduled_evaluation");
+      results.push({ contractId: contract.id, caseId: record.id, reason: record.contractEvaluation?.reason ?? "RECONCILIATION", status: record.xrplSettlement?.status });
+    }
+    return results;
+  });
+}
+
 export async function createCase(
   ownerId: string,
   input: z.infer<typeof newCaseSchema>,
@@ -588,14 +764,28 @@ export async function createContractCase(
   ownerId: string,
   input: z.infer<typeof newCaseSchema>,
   contractId: string,
+  mode: "rent" | "dispute" = "dispute",
 ) {
   const building = { ...await getBuildingContext(input.address, input.borough), address: input.address, borough: input.borough };
-  return mutateSession(ownerId, async (document) => {
+  return mutateSession(ownerId, async (document, mutation) => {
     await assertSessionNoPendingSettlement(document);
     if (document.cases.length >= 20) throw new ApiError(409, "This demo allows up to 20 cases per session.");
     const contract = document.contracts?.find((item) => item.id === contractId);
     if (!contract || contract.status !== "active" || contract.caseId) {
       throw new ApiError(409, "A fully accepted unused contract is required before creating a case.");
+    }
+    if (contract.policy) {
+      if (!isActiveContract(contract) || document.tenantUserId !== contract.tenantUserId
+        || document.managedProperty?.id !== contract.policy.property.id
+        || document.managedProperty.landlordUserId !== contract.landlordUserId
+        || input.monthlyRentCents !== contract.policy.monthlyRentCents || input.disputedAmountCents !== contract.policy.monthlyRentCents
+        || input.address !== contract.policy.property.address || input.borough !== contract.policy.property.borough) {
+        throw new ApiError(409, "Signed agreement terms and assigned parties must match this case.", false, "CASE_CONTRACT_MISMATCH");
+      }
+      if (document.cases.some((item) => item.contractSnapshot?.policy?.property.id === contract.policy!.property.id
+        && item.contractSnapshot.policy.obligationPeriod === contract.policy!.obligationPeriod)) {
+        throw new ApiError(409, "This prototype already has a case for this property and obligation period. A new agreement version cannot duplicate its payment.", false, "CONTRACT_OBLIGATION_EXISTS");
+      }
     }
     const caseRecord = createNewCase(ownerId, { ...input, building });
     caseRecord.case_type = contract.case_type;
@@ -608,8 +798,16 @@ export async function createContractCase(
     }
     caseRecord.accountBalanceCents = document.accountBalanceCents;
     document.cases.push(caseRecord);
-    contract.status = "used";
+    if (!contract.policy) contract.status = "used";
     contract.caseId = caseRecord.id;
+    if (contract.policy) {
+      caseRecord.contractId = contract.id;
+      caseRecord.escrow.destination = contract.policy.settlement.destination;
+      caseRecord.contractSnapshot = structuredClone(contract);
+      caseRecord.contractDispute = mode === "rent" ? "none" : "open";
+      caseRecord.title = mode === "rent" ? "Agreement rent obligation" : "Agreement repair dispute";
+      await evaluateContractInSession(document, caseRecord, mutation, mode === "rent" ? "case_created" : "dispute_opened");
+    }
     return caseRecord;
   });
 }
@@ -630,6 +828,7 @@ export async function addUploadedEvidence(ownerId: string, caseId: string, evide
     // Keep the upload even if the provider times out or the request is interrupted.
     await mutation.checkpoint();
     await analyzeAndRecordEvidence(caseRecord, evidence);
+    if (caseRecord.contractId) await evaluateContractInSession(document, caseRecord, mutation, "evidence_analyzed");
     return caseRecord;
   });
 }
@@ -641,7 +840,7 @@ export type LandlordAction =
 
 /** The role is rechecked inside the same serialized mutation as case assignment. */
 export async function performLandlordAction(ownerId: string, caseId: string, user: AuthUser, action: LandlordAction) {
-  return mutateSession(ownerId, async (document) => {
+  return mutateSession(ownerId, async (document, mutation) => {
     const record = findCase(document, caseId);
     requireLandlordCaseAccess(user, record);
     await assertSessionNoPendingSettlement(document);
@@ -668,6 +867,9 @@ export async function performLandlordAction(ownerId: string, caseId: string, use
       applyLandlordReply(record, action.notes, "received", {
         intent: "repair_complete", summary: "The assigned property manager reported the repair complete.", source: "rules",
       });
+    }
+    if (record.contractId && action.action === "report_complete") {
+      await evaluateContractInSession(document, record, mutation, "repair_reported");
     }
     return record;
   });
@@ -703,6 +905,7 @@ async function requestAgentSettlementIfEligible(
   mutation: SessionMutationContext,
   messaging: MessagingDependencies,
 ): Promise<CaseActionResult | null> {
+  if (caseRecord.contractId || document.tenantUserId) return null;
   const request = proposeXrplAgentSettlement(caseRecord);
   if (!request) return null;
 
@@ -713,7 +916,7 @@ async function requestAgentSettlementIfEligible(
     "The authorized agent requested the server-owned settlement action. Wallet, amount, network, transaction type and signing credentials remain pinned by the server.",
     "escrow");
   await mutation.checkpoint();
-  return applyAction(document, caseRecord, request, mutation, messaging, "settlement_agent");
+  return applyAction(document, caseRecord, { action: "settle_xrpl" }, mutation, messaging, "settlement_agent");
 }
 
 async function applyAction(
@@ -734,11 +937,14 @@ async function applyAction(
       wallet_switch: "DESTINATION_WALLET_MISMATCH",
       amount_tamper: "AMOUNT_OUTSIDE_AUTHORIZATION",
       prompt_injection: "DESTINATION_WALLET_MISMATCH",
-      insufficient_funds: "INSUFFICIENT_XRPL_FUNDS",
+      insufficient_funds: caseRecord.xrplSettlement.asset === "RLUSD"
+        ? "INSUFFICIENT_RLUSD_FUNDS" : "INSUFFICIENT_XRPL_FUNDS",
       duplicate: "SETTLEMENT_ALREADY_COMPLETED",
       wrong_network: "WRONG_NETWORK",
       wrong_case: "WRONG_CASE",
       unsupported_action: "ACTION_OUTSIDE_PERMISSION_SCOPE",
+      issuer_tamper: "ASSET_DEFINITION_MISMATCH",
+      wrong_asset: "ASSET_NOT_APPROVED",
     };
     const targeted = demonstration.policy.checks.find((check) => check.key === scenarioCode[action.scenario] && !check.passed);
     if (targeted) {
@@ -761,6 +967,16 @@ async function applyAction(
     await assertSessionNoPendingSettlement(document);
   }
   if (action.action === "settle_xrpl") {
+    if (caseRecord.contractId && settlementActor !== "settlement_agent") throw new ApiError(409,
+      "Only the contract-governed runtime agent executes this financial action. Confirm facts or let the scheduled evaluator run.", false, "AGENT_RUNTIME_REQUIRED");
+    if (caseRecord.contractId) {
+      const contract = hydrateContractAuthority(document, caseRecord);
+      // A fresh clock evaluation precedes the existing policy and signing checks.
+      caseRecord.contractEvaluation = evaluateContractPolicy(contract, caseRecord,
+        { fundsAvailable: caseRecord.escrow.status === "locked" }, new Date());
+    } else if (document.tenantUserId && !caseRecord.xrplSettlement?.hash) {
+      throw new ApiError(409, "Sign a bilateral agreement before starting a financial workflow.", false, "ACTIVE_CONTRACT_REQUIRED");
+    }
     const settlement = caseRecord.xrplSettlement;
     if (!settlement) throw new ApiError(409, "Enable XRPL Testnet settlement first.", false, "XRPL_NOT_ENABLED");
     if (settlement.status !== "pending" && settlement.status !== "validated") {
@@ -799,7 +1015,10 @@ async function applyAction(
         const receipt = await executeXrplSettlement({
           ownerId: document.ownerId,
           actor: settlementActor ?? "tenant",
-          loadCase: async () => structuredClone(caseRecord),
+          loadCase: async () => {
+            if (caseRecord.contractId) hydrateContractAuthority(document, caseRecord);
+            return structuredClone(caseRecord);
+          },
           beforeSubmit: async (pending) => {
             const finalPolicy = evaluateXrplPolicy(caseRecord, pending.intent, document.ownerId);
             // Signing already happened. A time-sensitive check can expire here;
@@ -809,7 +1028,7 @@ async function applyAction(
             await recordXrplPending(settlement, pending);
             persistedPending = pending;
             Object.assign(settlement, {
-              status: "pending", hash: pending.hash, sequence: pending.sequence,
+              status: "pending", hash: pending.hash, transactionHash: pending.hash, sequence: pending.sequence,
               lastLedgerSequence: pending.lastLedgerSequence,
               detail: `Signed transaction prepared at ledger ${pending.preparedLedgerIndex}; durable reconciliation is required after submission.`,
             });
@@ -942,6 +1161,11 @@ async function applyAction(
       break;
     }
     case "create_escrow": {
+      if (document.tenantUserId || caseRecord.contractId) {
+        const contract = hydrateContractAuthority(document, caseRecord);
+        caseRecord.contractEvaluation = evaluateContractPolicy(contract, caseRecord,
+          { fundsAvailable: caseRecord.escrow.status === "locked" }, new Date());
+      }
       if (caseRecord.escrow.status === "locked") return { case: caseRecord };
       await refreshFinancialProfile(caseRecord);
       caseRecord.accountBalanceCents = document.accountBalanceCents;
@@ -994,13 +1218,15 @@ async function applyAction(
       if (!caseRecord.tenantConfirmed) {
         caseRecord.tenantConfirmed = true;
         updateStatus(caseRecord);
-        event(caseRecord, "Tenant confirmed resolution", "The tenant confirmed that the reported issue has been resolved. Escrow release remains a separate action.", "verification");
+        event(caseRecord, "Tenant confirmed resolution", "The tenant confirmed the real-world repair condition. Any financial consequence is determined by the signed agreement policy.", "verification");
       }
       const agentResult = await requestAgentSettlementIfEligible(document, caseRecord, mutation, messaging);
       if (agentResult) return agentResult;
       break;
     }
     case "release_escrow": {
+      if (document.tenantUserId || caseRecord.contractId) throw new ApiError(409,
+        "The signed agreement governs autonomous RLUSD release. Simulated manual release cannot bypass it.", false, "CONTRACT_SETTLEMENT_REQUIRED");
       await refreshFinancialProfile(caseRecord);
       if (caseRecord.xrplSettlement && caseRecord.xrplSettlement.status !== "validated") {
         const intent = makeXrplIntent(caseRecord);
@@ -1033,6 +1259,10 @@ async function applyAction(
       return { case: caseRecord, policy };
     }
     case "enable_xrpl": {
+      if (document.tenantUserId || caseRecord.contractId) {
+        hydrateContractAuthority(document, caseRecord);
+        caseRecord.contractTrigger ??= "escrow_funded";
+      }
       const existing = caseRecord.xrplSettlement;
       if (existing) {
         // Old unsubmitted authorizations can explicitly refresh participant binding.
@@ -1046,7 +1276,7 @@ async function applyAction(
             throw error;
           }
           if (existing.source !== pinned.source || existing.destination !== pinned.destination
-            || existing.amountDrops !== pinned.amountDrops || existing.amountUsdCents !== pinned.amountUsdCents
+            || !sameAssetPermission(existing, pinned) || existing.amountUsdCents !== pinned.amountUsdCents
             || existing.ownerId !== pinned.ownerId || existing.caseId !== pinned.caseId
             || existing.escrowId !== pinned.escrowId || existing.network !== pinned.network
             || existing.transactionType !== pinned.transactionType) {
@@ -1072,11 +1302,14 @@ async function applyAction(
         throw error;
       }
       event(caseRecord, "XRPL Testnet settlement enabled",
-        `${caseRecord.xrplSettlement.amountDrops} drops are pinned to the authorized source and recipient for this case.`,
+        `${formatSettlementAsset(caseRecord.xrplSettlement)} is pinned to the authorized source and recipient for this case.`,
         "escrow");
       break;
     }
     case "authorize_xrpl_agent": {
+      if (document.tenantUserId || caseRecord.contractId) {
+        throw new ApiError(409, "Agent authority comes from both agreement signatures. Individual payment authorization is not supported.", false, "CONTRACT_AUTHORITY_REQUIRED");
+      }
       const settlement = caseRecord.xrplSettlement;
       if (!settlement) {
         throw new ApiError(409, "Enable XRPL Testnet settlement before authorizing its settlement agent.", false,
@@ -1450,6 +1683,7 @@ export async function receiveParticipantMessage(
     }
     let shouldRelay = message.relayRequired !== false;
     let caseStateUpdated = false;
+    let contractRepairReported = false;
     const shortReplyRelay = buildShortReplyRelay(body, role, caseRecord);
     // A stored inbound/interpretation alone is not proof that a relay was ever
     // reserved. Recover old `other` records through the corrected classifier;
@@ -1458,8 +1692,17 @@ export async function receiveParticipantMessage(
       const previous = message.interpretation;
       if (!previous || previous.intent === "other") {
         const before = JSON.stringify([caseRecord.maintenanceSchedule, caseRecord.repairReported, caseRecord.messagingEvents?.length]);
+        const repairWasReported = caseRecord.repairReported;
         const interpretation = await messaging.classify(body, role, caseRecord, new Date(incoming.createdAt));
         shouldRelay = applyParticipantInterpretation(caseRecord, role, message, interpretation);
+        if (caseRecord.contractId && role === "landlord" && interpretation.intent === "repair_complete"
+          && !repairWasReported && caseRecord.repairReported) {
+          // A provider message establishes only the landlord's report. Any old
+          // evidence comparison and tenant confirmation must be refreshed before
+          // the signed contract can permit a payment.
+          invalidateVerification(caseRecord);
+          contractRepairReported = true;
+        }
         caseStateUpdated = before !== JSON.stringify([caseRecord.maintenanceSchedule, caseRecord.repairReported, caseRecord.messagingEvents?.length]);
       } else if (["scheduled", "rescheduled", "reschedule_request", "schedule_confirmed", "no_show"].includes(previous.intent)
         && caseRecord.maintenanceSchedule
@@ -1474,6 +1717,9 @@ export async function receiveParticipantMessage(
     let relay: CaseMessage | undefined;
     if (relayBody) {
       relay = await sendAgentParticipantMessage(caseRecord, recipientRole, relayBody, message.id, mutation, messaging);
+    }
+    if (contractRepairReported) {
+      await evaluateContractInSession(document, caseRecord, mutation, "repair_reported");
     }
     return participantReceiveResult(caseRecord, message, role, Boolean(existing), caseStateUpdated,
       relay, Boolean(relayBody), hadConversation);
@@ -1542,7 +1788,7 @@ export async function receiveLandlordMessage(ownerId: string, caseId: string | u
 }
 
 export async function performCaseAction(ownerId: string, caseId: string, action: CaseAction, messaging = defaultMessaging) {
-  return mutateSession(ownerId, (document, mutation) => {
+  return mutateSession(ownerId, async (document, mutation) => {
     const caseRecord = findCase(document, caseId);
     if (document.tenantUserId && (action.action === "simulate_landlord_reply" || action.action === "record_landlord_reply")) {
       throw new ApiError(403, "Landlord replies and repair reports must come from the assigned property manager.", false, "ROLE_NOT_ALLOWED");
@@ -1556,6 +1802,63 @@ export async function performCaseAction(ownerId: string, caseId: string, action:
         "XRPL_ACCOUNT_NOT_AUTHORIZED");
     }
     if (action.action === "enable_xrpl") assertXrplStorageCapability();
-    return applyAction(document, caseRecord, action, mutation, messaging);
+    if (action.action === "contract_security_demo") {
+      hydrateContractAuthority(document, caseRecord);
+      const permission = caseRecord.xrplSettlement;
+      if (!permission) throw new ApiError(409, "Fund the agreement's simulated rent before running its payment attacks.", false, "XRPL_NOT_ENABLED");
+      const snapshot = structuredClone(caseRecord);
+      let demonstration;
+      if (action.scenario === "excess_fee") {
+        const fee = evaluateContractFeeRequest(snapshot.contractSnapshot!, 50_000);
+        demonstration = { intent: makeXrplIntent(snapshot), policy: { approved: fee.allowed, checks: [{ key: fee.reason,
+          label: "Contract late-fee maximum", passed: fee.allowed, detail: `Agent requested a $500 simulated fee. The signed maximum is $${(fee.maximumFeeCents / 100).toFixed(2)}; only the exact configured fee may be recorded.` }] },
+          detail: "BLOCKED BEFORE SIGNING. Nothing signed. Nothing submitted." };
+      } else if (action.scenario === "mutate_terms") {
+        snapshot.contractSnapshot!.policy!.monthlyRentCents += 1;
+        const changed = evaluateContractPolicy(snapshot.contractSnapshot!, snapshot, { fundsAvailable: snapshot.escrow.status === "locked" }, new Date());
+        demonstration = { intent: makeXrplIntent(snapshot), policy: { approved: false, checks: contractRuleChecks(changed) },
+          detail: "Changing signed terms invalidates the canonical policy hash. A new agreement and both signatures are required. BLOCKED BEFORE SIGNING. Nothing signed. Nothing submitted." };
+      } else {
+        demonstration = runXrplSecurityDemo(snapshot, document.ownerId, action.scenario);
+      }
+      const scenarioCode: Record<typeof action.scenario, string> = {
+        wallet_switch: "DESTINATION_WALLET_MISMATCH", amount_tamper: "AMOUNT_OUTSIDE_AUTHORIZATION",
+        issuer_tamper: "ASSET_DEFINITION_MISMATCH", wrong_network: "WRONG_NETWORK",
+        duplicate: "SETTLEMENT_ALREADY_COMPLETED", excess_fee: "FEE_EXCEEDS_CONTRACT_POLICY",
+        unsupported_action: "ACTION_OUTSIDE_PERMISSION_SCOPE", mutate_terms: "CONTRACT_HASH_MISMATCH",
+        prompt_injection: "DESTINATION_WALLET_MISMATCH", insufficient_funds: "INSUFFICIENT_RLUSD_FUNDS",
+        wrong_case: "WRONG_CASE", wrong_asset: "ASSET_NOT_APPROVED",
+      };
+      const targeted = demonstration.policy.checks.find((check) => !check.passed && check.key === scenarioCode[action.scenario]);
+      if (targeted) demonstration.policy.checks = [targeted, ...demonstration.policy.checks.filter((check) => check !== targeted)];
+      const code = action.scenario === "unsupported_action" ? "ACTION_NOT_PERMITTED_BY_CONTRACT" : scenarioCode[action.scenario];
+      if (demonstration.policy.approved) throw new ApiError(500, "The attack fixture unexpectedly passed policy.", false, "INVALID_SECURITY_DEMO");
+      appendXrplAudit(caseRecord, demonstration.intent, "rejected", `Contract attack dry run. ${demonstration.detail}`, {
+        code, signed: false, submitted: false, policy: demonstration.policy, actor: "settlement_agent",
+      });
+      return { case: caseRecord, policy: demonstration.policy };
+    }
+    if (action.action === "evaluate_contract") {
+      return evaluateContractInSession(document, caseRecord, mutation, "case_evaluation_requested");
+    }
+    if (action.action === "open_contract_dispute") {
+      hydrateContractAuthority(document, caseRecord);
+      await assertSessionNoPendingSettlement(document);
+      assertMutable(caseRecord);
+      if (caseRecord.xrplSettlement?.hash || caseRecord.escrow.status === "released") throw new ApiError(409,
+        "An already executed obligation cannot be reopened to change its payment.", false, "SETTLEMENT_ALREADY_COMPLETED");
+      caseRecord.contractDispute = "open";
+      invalidateVerification(caseRecord);
+      event(caseRecord, "Qualifying agreement dispute opened", "The signed HOLD_ALL demo policy holds this obligation until its required repair facts pass.", "case");
+      return evaluateContractInSession(document, caseRecord, mutation, "dispute_opened");
+    }
+    const result = await applyAction(document, caseRecord, action, mutation, messaging);
+    const triggers: Partial<Record<CaseAction["action"], string>> = {
+      create_escrow: "escrow_funded", verify_repair: "evidence_verified", confirm_resolution: "tenant_confirmed_repair",
+      analyze_evidence: "evidence_analyzed", add_demo_evidence: "evidence_added", sync_finances: "financial_state_updated",
+    };
+    const trigger = triggers[action.action];
+    if (caseRecord.contractId && trigger) return evaluateContractInSession(document, caseRecord, mutation, trigger);
+    return result;
   });
 }

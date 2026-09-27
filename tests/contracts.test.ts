@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { createContract, createCaseForContract, acceptContract } from "../src/lib/server/contracts";
+import { contractSchema, createContract, createCaseForContract, acceptContract, getContractsForUser, rejectContractMutation } from "../src/lib/server/contracts";
 import { registerUser } from "../src/lib/server/auth";
 import { performCaseAction } from "../src/lib/server/cases";
 import { createSession, readSession, resetSession, mutateSession } from "../src/lib/server/store";
-import type { TransactionIntent } from "../src/lib/types";
+import type { AuthUser, TransactionIntent } from "../src/lib/types";
+
+test("agreement input rejects calendar rollovers before persisting an unsignable policy", () => {
+  const draft = { case_type: "bilateral", terms: "Prototype agreement", policy: { effectiveDate: "2026-02-31" } };
+  assert.equal(contractSchema.safeParse(draft).success, false);
+  assert.equal(contractSchema.safeParse({ ...draft, policy: { effectiveDate: "2028-02-29" } }).success, true);
+});
 
 function localStorage(t: TestContext) {
   const previous = process.env.RENTESCROW_STORAGE;
@@ -163,4 +169,69 @@ test("a queued reset cannot leave a contract referring to a removed profile", as
   const after = await readSession(document.ownerId);
   assert.equal(after?.users, undefined);
   assert.equal(after?.contracts, undefined);
+});
+
+test("authenticated tenant and assigned landlord separately sign the same immutable policy version", async (t) => {
+  localStorage(t);
+  const environment = {
+    XRPL_SETTLEMENT_ENABLED: "true", XRPL_NETWORK: "testnet", XRPL_SETTLEMENT_ASSET: "RLUSD",
+    XRPL_TENANT_ADDRESS: "r3sYwD7h1C91HnaCiBReLae9VrcFjexAhg", XRPL_TENANT_SEED: "server-only-test-placeholder",
+    XRPL_RLUSD_LANDLORD_ADDRESS: "rKrKcMxW7ZEvidUFGJkc9YwukjYnMCqoVT",
+    XRPL_RLUSD_ISSUER: "rQhWct2fv4Vc4KRjRgMrxa8xPN9Zx9iLKV", XRPL_RLUSD_CURRENCY: "RLUSD",
+    XRPL_SETTLEMENT_AMOUNT_RLUSD: "10",
+  };
+  const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, environment);
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  const { document } = await createSession();
+  const tenant: AuthUser = { id: "tenant-auth", role: "tenant", displayName: "Rayaan", email: "tenant@example.test",
+    workspaceOwnerId: document.ownerId };
+  const landlord: AuthUser = { id: "landlord-auth", role: "landlord", displayName: "Alex Morgan",
+    email: "landlord@example.test", workspaceOwnerId: "landlord-workspace" };
+  await mutateSession(document.ownerId, (stored) => {
+    stored.tenantUserId = tenant.id;
+    stored.tenantDisplayName = tenant.displayName;
+    stored.xrplAuthorized = true;
+    stored.managedProperty = { id: "property-one", address: "123 Example Street", borough: "Brooklyn",
+      landlordUserId: landlord.id, landlordDisplayName: landlord.displayName };
+  });
+
+  const contract = await createContract(document.ownerId, {
+    case_type: "bilateral", terms: "Prototype contract-configured demo policy.",
+  }, tenant);
+  assert.equal(contract.status, "draft");
+  assert.equal(contract.acceptances.length, 0);
+  assert.equal(contract.policy?.settlement.asset, "RLUSD");
+  assert.equal(contract.policy?.monthlyRentCents, 40_000);
+  await assert.rejects(acceptContract(document.ownerId, contract.id, "tenant", tenant), /review the current/i);
+
+  const tenantSigned = await acceptContract(document.ownerId, contract.id, "tenant", tenant,
+    { termsHash: contract.termsHash, policyHash: contract.policyHash });
+  assert.equal(tenantSigned.status, "draft");
+  assert.deepEqual(tenantSigned.acceptances.map((item) => item.role), ["tenant"]);
+  await assert.rejects(acceptContract(document.ownerId, contract.id, "landlord", { ...landlord, id: "attacker" },
+    { termsHash: contract.termsHash, policyHash: contract.policyHash }), /different user/i);
+
+  assert.equal((await getContractsForUser(landlord)).some((item) => item.id === contract.id), true);
+  const active = await acceptContract(document.ownerId, contract.id, "landlord", landlord,
+    { termsHash: contract.termsHash, policyHash: contract.policyHash });
+  assert.equal(active.status, "active");
+  assert.equal(active.acceptances.length, 2);
+  assert.equal(active.acceptances.every((item) => item.termsHash === active.termsHash && item.policyHash === active.policyHash), true);
+  await assert.rejects(rejectContractMutation(tenant, contract.id), (error: unknown) =>
+    error instanceof Error && /immutable/i.test(error.message));
+  assert.equal((await readSession(document.ownerId))?.contracts?.find((item) => item.id === contract.id)?.terms, contract.terms);
+
+  const governedCase = await createCaseForContract(document.ownerId, { contractId: contract.id, mode: "dispute" });
+  assert.equal(governedCase.contractId, contract.id);
+  assert.equal(governedCase.contractDispute, "open");
+  assert.equal(governedCase.contractSnapshot?.policyHash, contract.policyHash);
+  const stored = await readSession(document.ownerId);
+  assert.equal(stored?.contracts?.find((item) => item.id === contract.id)?.status, "active");
+  await assert.rejects(createCaseForContract(document.ownerId, { contractId: contract.id, mode: "rent" }), /unused contract/i);
 });

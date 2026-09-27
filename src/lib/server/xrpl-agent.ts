@@ -9,7 +9,7 @@ import type { CaseRecord } from "@/lib/types";
  */
 export interface XrplAgentSettlementRequest {
   readonly caseId: string;
-  readonly action: "settle_xrpl";
+  readonly requestedAction: "REQUEST_SETTLEMENT";
 }
 
 export function proposeXrplAgentSettlement(
@@ -34,5 +34,19 @@ export function proposeXrplAgentSettlement(
     return null;
   }
 
-  return Object.freeze({ caseId: record.id, action: "settle_xrpl" });
+  return Object.freeze({ caseId: record.id, requestedAction: "REQUEST_SETTLEMENT" });
+}
+
+/** Contract authority replaces individual payment approval for the runtime agent. */
+export function proposeContractAgentSettlement(record: Readonly<CaseRecord>) {
+  const permission = record.xrplSettlement;
+  const decision = record.contractEvaluation;
+  if (!record.contractId || record.contractSnapshot?.status !== "active"
+    || record.contractSnapshot.id !== record.contractId || decision?.allowed !== true
+    || decision.action !== "RELEASE_RENT" || decision.contractId !== record.contractId
+    || decision.policyHash !== record.contractSnapshot.policyHash
+    || !permission || permission.contractId !== record.contractId
+    || permission.policyHash !== decision.policyHash || permission.status !== "ready"
+    || permission.hash || permission.agentRequestedAt) return null;
+  return Object.freeze({ contractId: record.contractId, caseId: record.id, requestedAction: "RELEASE_RENT" as const });
 }

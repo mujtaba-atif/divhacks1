@@ -40,6 +40,9 @@ const transactionIntentSchema = z.object({
 }).strict();
 
 export const actionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("open_contract_dispute") }).strict(),
+  z.object({ action: z.literal("evaluate_contract") }).strict(),
+  z.object({ action: z.literal("contract_security_demo"), scenario: z.enum(["wallet_switch", "amount_tamper", "issuer_tamper", "wrong_network", "duplicate", "excess_fee", "unsupported_action", "mutate_terms", "prompt_injection", "insufficient_funds", "wrong_case", "wrong_asset"]) }).strict(),
   z.object({ action: z.literal("add_demo_evidence"), stage: z.enum(["before", "after"]) }).strict(),
   z.object({ action: z.literal("analyze_evidence"), evidenceId: text(120) }).strict(),
   z.object({ action: z.literal("send_message"), body: text(5_000), approved: z.literal(true), requestId: z.string().uuid() }).strict(),
@@ -56,6 +59,7 @@ export const actionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("xrpl_security_demo"), scenario: z.enum([
     "wallet_switch", "amount_tamper", "prompt_injection", "insufficient_funds",
     "duplicate", "wrong_network", "wrong_case", "unsupported_action",
+    "issuer_tamper", "wrong_asset",
   ]) }).strict(),
   z.object({ action: z.literal("add_expense"), label: text(160), amountCents: cents, category: text(80) }).strict(),
   z.object({ action: z.literal("sync_finances") }).strict(),
