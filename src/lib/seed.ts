@@ -97,6 +97,8 @@ export function createDemoCase(ownerId: string): CaseRecord {
     analysis: {
       summary: "The sample evidence records a 54 F indoor temperature and a reported three-day loss of heat.",
       severity: "high", temperatureF: 54, verified: false, source: "demo",
+      issueType: "heating", evidenceType: "thermometer_photo", confidence: 1,
+      observations: ["Sample thermometer displays approximately 54°F."], requiresHumanConfirmation: true,
       reasons: ["Demo fixture, not a live Gemini analysis.", "Six sample heating complaints appear in the building history."],
     },
   }];

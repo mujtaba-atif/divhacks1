@@ -36,6 +36,9 @@ JPEG, WebP, or PDF, and record expenses. Real uploads remain unverified without
 Gemini credentials. Sample evidence is always labeled and never passed off as
 live AI analysis.
 
+See [Gemini setup, real-image testing, and judge walkthrough](docs/gemini-demo.md)
+for the live upload path and the deterministic 54°F → 72°F comparison.
+
 ## Integrations
 
 Use `.env.example` as the configuration reference. Put secrets in ignored
@@ -46,7 +49,7 @@ limitations.
 | Service | Available behavior |
 | --- | --- |
 | NYC Open Data | Public building complaint and violation lookup; explicit warnings on unavailable data |
-| Gemini | Server-side structured evidence analysis and before/after comparison when configured |
+| Gemini | Real server-side upload analysis when configured; application rules compare before/after readings |
 | Nessie | Verified sandbox customer/account binding, rent history, tenant-reviewed costs, and account-substitution guardrail |
 | Photon Spectrum | Tenant-approved iMessage, durable send receipts, and an authenticated case reply listener |
 | MongoDB Atlas | Session records and GridFS uploads when configured; local atomic JSON persistence by default |
