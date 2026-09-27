@@ -33,12 +33,12 @@ function environment(t: TestContext, overrides: Record<string, string | undefine
   return record;
 }
 
-function fakeClient() {
+function fakeClient(recipient = syntheticEnvironment.PHOTON_ALLOWED_RECIPIENT) {
   let starts = 0;
   let stops = 0;
   const conversations: { recipient: string; line?: string }[] = [];
   const sent: string[] = [];
-  const conversationId = `any;-;${syntheticEnvironment.PHOTON_ALLOWED_RECIPIENT}`;
+  const conversationId = `any;-;${recipient}`;
   const dm: SpectrumDirectMessage = {
     id: conversationId, type: "dm", phone: syntheticEnvironment.SPECTRUM_SENDING_LINE,
     send: async (body) => {
@@ -62,6 +62,25 @@ function fakeClient() {
 
 const uncertain = (error: unknown) => error instanceof DeliveryUncertainError && error.code === "uncertain_delivery";
 const knownFailure = (error: unknown) => error instanceof IntegrationError && !(error instanceof DeliveryUncertainError);
+
+test("the demo sends to Rayyan's normalized number, never the tenant or a provider line", async (t) => {
+  environment(t, { PHOTON_ALLOWED_RECIPIENT: "+1 (973) 606-0558" });
+  const record = createDemoCase(syntheticEnvironment.PHOTON_TENANT_ID);
+  const fake = fakeClient("+19736060558");
+  for (const contact of ["+1 (973) 606-0558", "973-606-0558", "19736060558"]) {
+    record.landlordContact = contact;
+    const result = await sendLandlordMessage(record, "Approved demo notice", fake.dependencies);
+    assert.equal(result.recipient, "+19736060558");
+    assert.equal(fake.conversations.at(-1)?.recipient, "+19736060558");
+  }
+  assert.equal(getPhotonConfig()?.allowedRecipient, "+19736060558");
+  for (const contact of ["", " ", "+12018567033", "+16285550123"]) {
+    record.landlordContact = contact;
+    await assert.rejects(sendLandlordMessage(record, "Approved notice", fake.dependencies), knownFailure);
+  }
+  assert.equal(fake.conversations.length, 3);
+  assert.equal(fake.sent.length, 3);
+});
 
 test("demo mode never constructs an SDK client and includes the case reference", async (t) => {
   const record = environment(t, { PHOTON_LIVE_SEND: "false" });

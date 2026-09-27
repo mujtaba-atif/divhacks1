@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ArrowRight, Building2, CheckCircle2, Search } from "lucide-react";
 import { getBuildingSummary } from "@/lib/building-context";
 import type { BuildingRecord, IssueType } from "@/lib/types";
+import { DEMO_PARTICIPANTS } from "@/lib/seed";
 import { Button, Modal } from "./workspace-ui";
 
 export interface NewCaseInput {
@@ -86,8 +87,8 @@ export function NewCaseDialog({ onClose, onCreate, busy }: { onClose: () => void
         <label className="field">Issue<select name="issue" defaultValue="heating"><option value="heating">Heating / hot water</option><option value="mold">Mold</option><option value="leak">Water leak</option><option value="pests">Pests</option><option value="elevator">Elevator</option><option value="other">Other repair</option></select></label>
         <label className="field">First noticed<input name="noticedAt" type="date" defaultValue={new Date().toISOString().slice(0, 10)} max={new Date().toISOString().slice(0, 10)} required /></label>
         <label className="field field-wide">What happened?<textarea name="description" placeholder="Describe the issue and how it affects your apartment." rows={3} minLength={10} maxLength={4000} required /></label>
-        <label className="field">Landlord / property manager<input name="landlordName" placeholder="Property manager name" maxLength={150} required /></label>
-        <label className="field">Landlord contact<input name="landlordContact" placeholder="Email address or phone number" maxLength={200} required /></label>
+        <label className="field">Landlord / property manager<input name="landlordName" value={DEMO_PARTICIPANTS.landlord.name} readOnly /></label>
+        <label className="field">Landlord contact<input name="landlordContact" type="tel" value={DEMO_PARTICIPANTS.landlord.phone} readOnly /></label>
         <label className="field">Monthly rent (USD)<input name="monthlyRent" type="number" placeholder="2400.00" min="0.01" max="100000" step="0.01" required /></label>
         <label className="field">Disputed amount (USD)<input name="disputedAmount" type="number" placeholder="600.00" min="0.01" max="100000" step="0.01" required /></label>
       </div>
